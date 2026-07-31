@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "VC Next — Feasibility Prototype",
-        "width": 1280,
-        "height": 820,
-        "minWidth": 1040,
-        "minHeight": 720
+        "width": 1240,
+        "height": 780,
+        "minWidth": 1060,
+        "minHeight": 700
       }
     ],
     "security": {

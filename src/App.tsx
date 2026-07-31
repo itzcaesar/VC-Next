@@ -8,24 +8,28 @@ import {
   type SystemProfile,
 } from "./lib/engine";
 
-const modeDetails: Record<ConversionMode, { label: string; hint: string; target: string }> = {
-  quality: { label: "Quality", hint: "More context", target: "< 150 ms" },
-  balanced: { label: "Balanced", hint: "Voice chat", target: "< 110 ms" },
-  latency: { label: "Low latency", hint: "Tuned systems", target: "< 90 ms" },
+const modeLabels: Record<ConversionMode, string> = {
+  quality: "Quality",
+  balanced: "Balanced",
+  latency: "Low latency",
 };
 
-function Meter({ active, offset = 0 }: { active: boolean; offset?: number }) {
+function LevelMeter({ active, output = false }: { active: boolean; output?: boolean }) {
   return (
-    <div className={`meter ${active ? "is-active" : ""}`} aria-label={active ? "Signal detected" : "No signal"}>
-      {Array.from({ length: 14 }, (_, index) => (
-        <span
-          key={index}
-          style={{
-            animationDelay: `${(index + offset) * -55}ms`,
-            opacity: active ? undefined : Math.max(0.12, 0.45 - index * 0.025),
-          }}
-        />
+    <div className={`level-meter ${active ? "active" : ""}`} aria-label={active ? "Signal active" : "No signal"}>
+      {Array.from({ length: 18 }, (_, index) => (
+        <i key={index} className={index > 14 ? "peak" : ""} style={{ animationDelay: `${-(index + (output ? 4 : 0)) * 36}ms` }} />
       ))}
+    </div>
+  );
+}
+
+function Waveform({ active }: { active: boolean }) {
+  const heights = [16, 24, 35, 20, 44, 63, 36, 72, 48, 28, 54, 82, 46, 68, 31, 56, 77, 41, 25, 64, 88, 58, 36, 71, 49, 21, 43, 62, 38, 75, 52, 29, 68, 84, 46, 34, 57, 73, 40, 22, 48, 66, 33, 54, 79, 45, 27, 60, 72, 39, 19, 51, 69, 43, 30, 58, 81, 48, 35, 63, 42, 24, 47, 70];
+  return (
+    <div className={`waveform ${active ? "active" : ""}`} aria-hidden="true">
+      <div className="waveform-center" />
+      {heights.map((height, index) => <i key={index} style={{ height: `${height}%`, animationDelay: `${-index * 29}ms` }} />)}
     </div>
   );
 }
@@ -37,6 +41,8 @@ function App() {
   const [mode, setMode] = useState<ConversionMode>("balanced");
   const [pitch, setPitch] = useState(0);
   const [indexRate, setIndexRate] = useState(68);
+  const [protection, setProtection] = useState(33);
+  const [monitor, setMonitor] = useState(true);
   const [modelId, setModelId] = useState(MODEL_PRESETS[0].id);
 
   useEffect(() => {
@@ -48,143 +54,158 @@ function App() {
     [modelId],
   );
 
-  const engineState = running ? (bypassed ? "Bypassed" : "Converting") : "Ready";
+  const converting = running && !bypassed;
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark"><span /></div>
-          <div>
-            <strong>VC Next</strong>
-            <small>Feasibility prototype</small>
-          </div>
+    <div className="desktop-app">
+      <div className="menu-bar" data-tauri-drag-region>
+        <div className="app-identity">
+          <span className="app-icon"><i /></span>
+          <strong>VC Next</strong>
+          <span className="prototype-label">Prototype</span>
         </div>
-
-        <nav aria-label="Primary navigation">
-          <button className="nav-item active"><span>◉</span>Live</button>
-          <button className="nav-item" disabled><span>◇</span>Models<em>Next</em></button>
-          <button className="nav-item" disabled><span>⌁</span>Recordings</button>
-          <button className="nav-item" disabled><span>⌘</span>Presets</button>
-        </nav>
-
-        <div className="sidebar-spacer" />
-        <div className="gpu-card">
-          <div className="gpu-card-head">
-            <span className="status-dot" />
-            <small>Reference hardware</small>
-          </div>
-          <strong>{profile.gpu.replace("NVIDIA GeForce ", "")}</strong>
-          <span>{Math.round(profile.vramMb / 1024)} GB VRAM · CUDA target</span>
+        <div className="desktop-menu">
+          <button>File</button><button>Edit</button><button>View</button><button>Help</button>
         </div>
-        <button className="nav-item settings" disabled><span>⚙</span>Settings</button>
-      </aside>
+        <div className="session-name">Untitled voice session</div>
+        <div className="hardware-state"><span />{profile.gpu.replace("NVIDIA GeForce ", "")}</div>
+      </div>
 
-      <main className="main-content">
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">LOCAL VOICE CONVERSION</p>
-            <h1>Live studio</h1>
-          </div>
-          <div className="topbar-actions">
-            <div className="engine-pill"><span className={running ? "online" : ""} />{engineState}</div>
-            <button className={`bypass-button ${bypassed ? "active" : ""}`} onClick={() => setBypassed((value) => !value)}>
-              {bypassed ? "Resume conversion" : "Bypass"}
-            </button>
-          </div>
-        </header>
+      <div className="command-bar">
+        <div className="workspace-tabs" role="tablist" aria-label="Workspace">
+          <button className="active" role="tab" aria-selected="true">Live</button>
+          <button role="tab" aria-selected="false" disabled>Models</button>
+          <button role="tab" aria-selected="false" disabled>Recorder</button>
+        </div>
+        <div className="command-actions">
+          <button className="toolbar-button">Import model</button>
+          <button className="toolbar-button">Calibrate audio</button>
+          <span className="toolbar-separator" />
+          <button className={`bypass ${bypassed ? "active" : ""}`} onClick={() => setBypassed((value) => !value)}>
+            {bypassed ? "Bypassed" : "Bypass"}
+          </button>
+          <button className={`transport-button ${running ? "stop" : ""}`} onClick={() => setRunning((value) => !value)} aria-pressed={running}>
+            <span>{running ? "■" : "▶"}</span>{running ? "Stop" : "Start"}
+          </button>
+        </div>
+      </div>
 
-        <section className="device-row" aria-label="Audio devices">
-          <div className="device-block">
-            <span className="device-icon">IN</span>
-            <div><small>Microphone</small><strong>Default Windows input</strong></div>
-            <Meter active={running} />
-            <button aria-label="Change microphone">⌄</button>
+      <div className="workbench">
+        <aside className="library-pane">
+          <div className="pane-title"><strong>Model library</strong><button aria-label="Add model">＋</button></div>
+          <div className="search-box"><span>⌕</span><input placeholder="Search models" aria-label="Search models" /></div>
+          <div className="library-section-label">LOCAL MODELS</div>
+          <div className="model-list">
+            {MODEL_PRESETS.map((model) => (
+              <button key={model.id} className={modelId === model.id ? "selected" : ""} onClick={() => setModelId(model.id)}>
+                <span className="list-avatar">{model.initials}</span>
+                <span><strong>{model.name}</strong><small>{model.format} · {model.sampleRate / 1000} kHz</small></span>
+                {modelId === model.id && <i />}
+              </button>
+            ))}
           </div>
-          <div className="route-line"><i /><span>48 kHz</span><i /></div>
-          <div className="device-block output">
-            <span className="device-icon">OUT</span>
-            <div><small>Virtual output</small><strong>Configure during calibration</strong></div>
-            <Meter active={running && !bypassed} offset={4} />
-            <button aria-label="Change output">⌄</button>
+          <div className="empty-library-space">
+            <span>Drop voice models here</span>
+            <small>.pth, .onnx and .index</small>
           </div>
-        </section>
+          <div className="library-footer"><span>2 models</span><button>Open model folder</button></div>
+        </aside>
 
-        <div className="workspace-grid">
-          <section className="panel conversion-panel">
-            <div className="panel-heading">
-              <div><p className="eyebrow">ENGINE</p><h2>Conversion</h2></div>
-              <span className="prototype-badge">UI PROTOTYPE</span>
+        <main className="editor-pane">
+          <div className="editor-tabbar">
+            <div className="editor-tab active"><span className="tab-dot" />{selectedModel.name}<button>×</button></div>
+            <button className="new-tab">＋</button>
+          </div>
+
+          <div className="voice-editor">
+            <div className="voice-header">
+              <div className="voice-avatar">{selectedModel.initials}</div>
+              <div><h1>{selectedModel.name}</h1><p>{selectedModel.format} model · Ready on CUDA</p></div>
+              <button className="more-button" aria-label="Model actions">•••</button>
             </div>
 
-            <div className="power-area">
-              <div className={`power-halo ${running ? "active" : ""}`}>
-                <button className="power-button" onClick={() => setRunning((value) => !value)} aria-pressed={running}>
-                  <span className="power-symbol">↯</span>
-                  <strong>{running ? "Stop" : "Start"}</strong>
-                  <small>{running ? "Conversion active" : "Ready to convert"}</small>
-                </button>
+            <div className="signal-workspace">
+              <div className="signal-ruler"><span>INPUT</span><i /><span>LIVE SIGNAL</span><i /><span>OUTPUT</span></div>
+              <Waveform active={converting} />
+              <div className="signal-readout">
+                <div><small>Input peak</small><strong>{running ? "−12.4" : "−∞"} dB</strong></div>
+                <div className={`conversion-state ${converting ? "active" : ""}`}><span />{converting ? "Converting" : bypassed ? "Bypassed" : "Engine ready"}</div>
+                <div><small>Output peak</small><strong>{converting ? "−8.7" : "−∞"} dB</strong></div>
               </div>
-              <p>{running ? "Audio is flowing through the prototype pipeline." : "The native engine will connect here after calibration."}</p>
             </div>
 
-            <div className="mode-switch" aria-label="Conversion mode">
-              {(Object.keys(modeDetails) as ConversionMode[]).map((key) => (
-                <button key={key} className={mode === key ? "active" : ""} onClick={() => setMode(key)}>
-                  <strong>{modeDetails[key].label}</strong>
-                  <small>{modeDetails[key].hint}</small>
-                </button>
-              ))}
+            <div className="parameter-strip">
+              <label className="parameter">
+                <span><strong>Pitch</strong><output>{pitch > 0 ? "+" : ""}{pitch} st</output></span>
+                <input type="range" min="-12" max="12" value={pitch} onChange={(event) => setPitch(Number(event.target.value))} />
+                <small><span>−12</span><span>0</span><span>+12</span></small>
+              </label>
+              <label className="parameter">
+                <span><strong>Similarity</strong><output>{indexRate}%</output></span>
+                <input type="range" min="0" max="100" value={indexRate} onChange={(event) => setIndexRate(Number(event.target.value))} />
+                <small><span>Natural</span><span>Target</span></small>
+              </label>
+              <label className="parameter">
+                <span><strong>Protection</strong><output>{protection}%</output></span>
+                <input type="range" min="0" max="50" value={protection} onChange={(event) => setProtection(Number(event.target.value))} />
+                <small><span>Expressive</span><span>Stable</span></small>
+              </label>
             </div>
+
+            <div className="mode-bar">
+              <span>Processing mode</span>
+              <div>
+                {(Object.keys(modeLabels) as ConversionMode[]).map((key) => (
+                  <button key={key} className={mode === key ? "active" : ""} onClick={() => setMode(key)}>{modeLabels[key]}</button>
+                ))}
+              </div>
+              <button className="advanced-link">Advanced parameters…</button>
+            </div>
+          </div>
+        </main>
+
+        <aside className="inspector-pane">
+          <div className="pane-title"><strong>Session inspector</strong><button aria-label="Inspector options">•••</button></div>
+
+          <section className="inspector-section">
+            <h2>Audio devices <button>⌃</button></h2>
+            <label className="device-control"><span>Input</span><button><strong>Default Windows input</strong><small>48,000 Hz · Mono</small><i>⌄</i></button></label>
+            <LevelMeter active={running} />
+            <label className="device-control"><span>Output</span><button><strong>Virtual output not configured</strong><small>Run audio calibration</small><i>⌄</i></button></label>
+            <LevelMeter active={converting} output />
+            <label className="check-row"><input type="checkbox" checked={monitor} onChange={(event) => setMonitor(event.target.checked)} /><span>Monitor converted voice</span></label>
           </section>
 
-          <section className="panel model-panel">
-            <div className="panel-heading">
-              <div><p className="eyebrow">VOICE</p><h2>Model</h2></div>
-              <button className="text-button">Import model</button>
-            </div>
-
-            <label className="model-card">
-              <span className="model-avatar">{selectedModel.initials}</span>
-              <span className="model-meta"><small>Selected model</small><strong>{selectedModel.name}</strong><em>{selectedModel.format} · {selectedModel.sampleRate / 1000} kHz</em></span>
-              <select value={modelId} onChange={(event) => setModelId(event.target.value)} aria-label="Select voice model">
-                {MODEL_PRESETS.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
-              </select>
-            </label>
-
-            <div className="control-group">
-              <div className="control-label"><span><strong>Pitch shift</strong><small>Preserves the model's target range</small></span><output>{pitch > 0 ? "+" : ""}{pitch} st</output></div>
-              <input type="range" min="-12" max="12" value={pitch} onChange={(event) => setPitch(Number(event.target.value))} />
-              <div className="scale"><span>-12</span><span>Natural</span><span>+12</span></div>
-            </div>
-
-            <div className="control-group">
-              <div className="control-label"><span><strong>Voice similarity</strong><small>RVC retrieval-index blend</small></span><output>{indexRate}%</output></div>
-              <input type="range" min="0" max="100" value={indexRate} onChange={(event) => setIndexRate(Number(event.target.value))} />
-              <div className="scale"><span>Natural</span><span>Balanced</span><span>Target</span></div>
-            </div>
-
-            <button className="advanced-button">Advanced model controls <span>→</span></button>
+          <section className="inspector-section">
+            <h2>Inference <button>⌃</button></h2>
+            <dl className="property-list">
+              <div><dt>Backend</dt><dd>ONNX Runtime CUDA</dd></div>
+              <div><dt>Precision</dt><dd>FP16 target</dd></div>
+              <div><dt>Pitch extractor</dt><dd>RMVPE</dd></div>
+              <div><dt>GPU memory</dt><dd>{Math.round(profile.vramMb / 1024)} GB available</dd></div>
+            </dl>
           </section>
-        </div>
 
-        <section className="performance-panel">
-          <div className="performance-title">
-            <div><p className="eyebrow">TARGET BUDGET</p><h2>Latency pipeline</h2></div>
-            <div className="latency-target"><small>{modeDetails[mode].label} mode</small><strong>{modeDetails[mode].target}</strong></div>
-          </div>
-          <div className="stage-grid">
-            <div><span className="stage-icon">01</span><small>Capture</small><strong>10 ms</strong></div>
-            <i />
-            <div><span className="stage-icon">02</span><small>Pitch + content</small><strong>24 ms</strong></div>
-            <i />
-            <div><span className="stage-icon">03</span><small>RVC inference</small><strong>36 ms</strong></div>
-            <i />
-            <div><span className="stage-icon">04</span><small>Stitch + output</small><strong>20 ms</strong></div>
-          </div>
-          <div className="benchmark-note"><span>!</span>These are engineering budgets, not measured results. Physical loopback benchmarking is the next milestone.</div>
-        </section>
-      </main>
+          <section className="inspector-section latency-section">
+            <h2>Latency budget <button>⌃</button></h2>
+            <div className="latency-total"><span>Target total</span><strong>{mode === "latency" ? "< 90" : mode === "quality" ? "< 150" : "< 110"}<small> ms</small></strong></div>
+            <div className="latency-track"><i style={{ width: "11%" }} /><i style={{ width: "27%" }} /><i style={{ width: "40%" }} /><i style={{ width: "22%" }} /></div>
+            <dl className="latency-list">
+              <div><dt><i className="capture" />Capture</dt><dd>10 ms</dd></div>
+              <div><dt><i className="features" />Pitch + content</dt><dd>24 ms</dd></div>
+              <div><dt><i className="inference" />Inference</dt><dd>36 ms</dd></div>
+              <div><dt><i className="output" />Output</dt><dd>20 ms</dd></div>
+            </dl>
+            <p className="budget-warning">Target values—not measured yet.</p>
+          </section>
+        </aside>
+      </div>
+
+      <footer className="status-bar">
+        <div className="status-primary"><span className={converting ? "active" : ""} />{converting ? "Converting" : "Ready"}</div>
+        <div className="status-message">{bypassed ? "Audio is passing through without conversion" : "Local engine · No audio leaves this computer"}</div>
+        <div className="status-items"><span>48 kHz</span><span>Buffer: pending</span><span>CUDA</span><span>Driver {profile.driverVersion}</span></div>
+      </footer>
     </div>
   );
 }
