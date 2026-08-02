@@ -38,6 +38,7 @@ export interface AudioEngineStatus {
   outputDeviceName: string | null;
   monitorDeviceName: string | null;
   sampleRate: number | null;
+  inferenceSampleRate: number;
   inputChannels: number | null;
   outputChannels: number | null;
   monitorChannels: number | null;
@@ -69,6 +70,7 @@ export interface AudioEngineStatus {
   maxInferenceMicros: number;
   missedInferenceDeadlines: number;
   droppedInferenceFrames: number;
+  inferenceSilenceSuppressedCalls: number;
   inputPeak: number;
   outputPeak: number;
   monitorPeak: number;
@@ -76,6 +78,9 @@ export interface AudioEngineStatus {
   outputGainDb: number;
   monitorGainDb: number;
   noiseGateDb: number;
+  noiseSuppressionStrength: number;
+  echoControlStrength: number;
+  highPassEnabled: boolean;
   lastError: string | null;
 }
 
@@ -84,6 +89,9 @@ export interface AudioProcessingSettings {
   outputGainDb: number;
   monitorGainDb: number;
   noiseGateDb: number;
+  noiseSuppressionStrength: number;
+  echoControlStrength: number;
+  highPassEnabled: boolean;
 }
 
 export interface InferenceRuntimeProbe {
@@ -107,6 +115,12 @@ export interface InferenceRuntimeProbe {
     deviceCapability: number[] | null;
     error: string | null;
   };
+  onnxRuntime: {
+    imported: boolean;
+    availableProviders: string[];
+    cudaProviderAvailable: boolean;
+    error: string | null;
+  };
   capabilities: string[];
   readyForRvc: boolean;
   blockers: string[];
@@ -117,13 +131,28 @@ export interface ModelPreset {
   id: string;
   name: string;
   initials: string;
-  format: "RVC v2" | "RVC ONNX";
+  format: "RVC v1" | "RVC v2" | "RVC ONNX";
   sampleRate: number | null;
   sourcePath?: string;
   indexPaths?: string[];
   recommendedIndexPath?: string | null;
   embedderPath?: string | null;
+  /** True when the user explicitly selected the embedder in the package dialog. */
+  embedderExplicit?: boolean;
   pairingNote?: string;
+  modelDefaults?: ModelDefaults;
+}
+
+/** Safe settings imported from a w-okada-style params.json package file. */
+export interface ModelDefaults {
+  pitchShift?: number;
+  indexRatio?: number;
+  protectRatio?: number;
+  chunkFrames?: number;
+  extraFrames?: number;
+  embedder?: string;
+  pitchEstimator?: string;
+  recommendedIndex?: string | null;
 }
 
 export interface RvcModelSettings {
@@ -150,6 +179,7 @@ export interface ModelInspectionResult {
   recommendedIndex?: string | null;
   packageComplete?: boolean;
   pairingNote?: string;
+  modelDefaults?: ModelDefaults;
   safeInspectionOnly: boolean;
   checkpointLoaded: boolean;
   warnings: string[];
@@ -176,6 +206,7 @@ export interface LiveRvcStatus {
   indexDimension?: number | null;
   indexVectorCount?: number;
   indexType?: string | null;
+  indexNeighbors?: number;
   sampleRate: number;
   chunkFrames: number;
   chunkMilliseconds: number;
@@ -186,12 +217,17 @@ export interface LiveRvcStatus {
   crossfadeMilliseconds: number;
   solaSearchFrames: number;
   solaSearchMilliseconds: number;
+  silenceFrontFrames?: number;
+  silenceFrontFeatureFrames?: number;
+  generatorConvertFrames?: number;
   streamPrimed: boolean;
   rvcVersion?: string | null;
   targetSampleRate?: number | null;
   speakerCount?: number | null;
   precision?: string | null;
   device?: string | null;
+  backend?: "pytorch" | "onnx" | string | null;
+  generatorProviders?: string[];
   pitchShift: number;
   speakerId?: number;
   indexRatio?: number;
@@ -209,10 +245,40 @@ export interface LiveRvcStatus {
   lastGeneratorMs?: number;
   lastStitchMs?: number;
   lastSolaOffsetFrames?: number;
+  silenceSuppressedCalls?: number;
+  lastInputRms?: number;
+  lastInputPeak?: number;
+  maxInputRms?: number;
+  maxInputPeak?: number;
+  lastInputVolume?: number;
+  lastOutputGain?: number;
+  silenceGateRms?: number;
+  silenceGatePeak?: number;
+  silenceGateMode?: "rms" | "rms-and-peak" | "rms+activity";
   providers?: string[];
   workerState?: "stopped" | "healthy" | "recovering" | "failed";
   workerRestarts?: number;
   lastWorkerError?: string | null;
+}
+
+export interface LiveCalibrationMeasurement {
+  preset: ConversionMode;
+  chunkFrames: number;
+  analysisFrames: number;
+  processMs: number;
+  maxProcessMs?: number;
+  sampleCount?: number;
+  deadlineMs: number;
+  headroomMs: number;
+  stable: boolean;
+}
+
+export interface LiveCalibrationResult {
+  sampleRate: number;
+  recommendedPreset: ConversionMode;
+  restoredPreset: ConversionMode;
+  profiles: LiveCalibrationMeasurement[];
+  message: string;
 }
 
 export const FALLBACK_PROFILE: SystemProfile = {
@@ -245,6 +311,7 @@ export const STOPPED_ENGINE_STATUS: AudioEngineStatus = {
   outputDeviceName: null,
   monitorDeviceName: null,
   sampleRate: null,
+  inferenceSampleRate: 48_000,
   inputChannels: null,
   outputChannels: null,
   monitorChannels: null,
@@ -260,8 +327,8 @@ export const STOPPED_ENGINE_STATUS: AudioEngineStatus = {
   overruns: 0,
   monitorUnderruns: 0,
   monitorOverruns: 0,
-  primeTargetFrames: 960,
-  monitorPrimeTargetFrames: 960,
+  primeTargetFrames: 1920,
+  monitorPrimeTargetFrames: 1920,
   reprimes: 0,
   monitorReprimes: 0,
   driftDroppedFrames: 0,
@@ -276,6 +343,7 @@ export const STOPPED_ENGINE_STATUS: AudioEngineStatus = {
   maxInferenceMicros: 0,
   missedInferenceDeadlines: 0,
   droppedInferenceFrames: 0,
+  inferenceSilenceSuppressedCalls: 0,
   inputPeak: 0,
   outputPeak: 0,
   monitorPeak: 0,
@@ -283,6 +351,9 @@ export const STOPPED_ENGINE_STATUS: AudioEngineStatus = {
   outputGainDb: 0,
   monitorGainDb: -6,
   noiseGateDb: -80,
+  noiseSuppressionStrength: 0,
+  echoControlStrength: 0,
+  highPassEnabled: false,
   lastError: null,
 };
 
@@ -296,10 +367,13 @@ export const EMPTY_LIVE_RVC_STATUS: LiveRvcStatus = {
   analysisFrames: 24_000,
   analysisMilliseconds: 500,
   extraFrames: 24_000,
-  crossfadeFrames: 1_920,
-  crossfadeMilliseconds: 40,
+  crossfadeFrames: 4_096,
+  crossfadeMilliseconds: 4096 / 48,
   solaSearchFrames: 576,
   solaSearchMilliseconds: 12,
+  silenceFrontFrames: 0,
+  silenceFrontFeatureFrames: 0,
+  generatorConvertFrames: 28_672,
   streamPrimed: false,
   pitchShift: 0,
   speakerId: 0,
@@ -308,10 +382,12 @@ export const EMPTY_LIVE_RVC_STATUS: LiveRvcStatus = {
   indexDimension: null,
   indexVectorCount: 0,
   indexType: null,
+  indexNeighbors: 0,
   indexRatio: 0,
   protectRatio: 0.5,
   f0Method: "RMVPE",
-  f0Threshold: 0.03,
+  // w-okada's RMVPE ONNX extractor uses a 0.30 periodicity threshold.
+  f0Threshold: 0.30,
   streamingPreset: "balanced",
   processCalls: 0,
   lastProcessMs: 0,
@@ -339,6 +415,12 @@ export const FALLBACK_INFERENCE_RUNTIME: InferenceRuntimeProbe = {
     cudaVersion: null,
     deviceName: null,
     deviceCapability: null,
+    error: null,
+  },
+  onnxRuntime: {
+    imported: false,
+    availableProviders: [],
+    cudaProviderAvailable: false,
     error: null,
   },
   capabilities: [],
@@ -414,6 +496,11 @@ export async function stopAudioEngine(): Promise<AudioEngineStatus> {
   return invoke<AudioEngineStatus>("stop_audio_engine");
 }
 
+export async function restartAudioEngine(): Promise<AudioEngineStatus> {
+  if (!isTauriRuntime()) throw new Error("Audio recovery requires the Tauri desktop app.");
+  return invoke<AudioEngineStatus>("restart_audio_engine");
+}
+
 export async function getAudioEngineStatus(): Promise<AudioEngineStatus> {
   if (!isTauriRuntime()) return STOPPED_ENGINE_STATUS;
   return invoke<AudioEngineStatus>("get_audio_engine_status");
@@ -424,9 +511,19 @@ export async function probeInferenceRuntime(): Promise<InferenceRuntimeProbe> {
   return invoke<InferenceRuntimeProbe>("probe_inference_runtime");
 }
 
+export async function openRuntimeSetup(): Promise<string> {
+  if (!isTauriRuntime()) throw new Error("Runtime setup requires the Tauri desktop app.");
+  return invoke<string>("open_runtime_setup");
+}
+
 export async function inspectRvcModel(path: string): Promise<ModelInspectionResult> {
   if (!isTauriRuntime()) throw new Error("Model inspection requires the Tauri desktop app.");
   return invoke<ModelInspectionResult>("inspect_rvc_model", { path });
+}
+
+export async function discoverRvcModels(path: string): Promise<string[]> {
+  if (!isTauriRuntime()) throw new Error("Model folder discovery requires the Tauri desktop app.");
+  return invoke<string[]>("discover_rvc_models", { path });
 }
 
 export async function inspectTrustedRvcCheckpoint(path: string): Promise<TrustedCheckpointInspection> {
@@ -448,6 +545,11 @@ export async function setLiveRvcSettings(settings: RvcModelSettings): Promise<Li
 export async function getLiveRvcStatus(): Promise<LiveRvcStatus> {
   if (!isTauriRuntime()) return EMPTY_LIVE_RVC_STATUS;
   return invoke<LiveRvcStatus>("get_live_rvc_status");
+}
+
+export async function calibrateLiveRvc(): Promise<LiveCalibrationResult> {
+  if (!isTauriRuntime()) throw new Error("Stream calibration requires the Tauri desktop app.");
+  return invoke<LiveCalibrationResult>("calibrate_live_rvc");
 }
 
 export async function unloadLiveRvcModel(): Promise<LiveRvcStatus> {
