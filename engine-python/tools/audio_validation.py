@@ -128,6 +128,33 @@ def _device_label(sd: Any, device: int | str | None) -> str:
     return str(device)
 
 
+def resolve_stream_device(sd: Any, device: int | str | None, *, input_direction: bool) -> int | str | None:
+    """Resolve a duplicate Windows endpoint name to its WASAPI instance."""
+
+    if not isinstance(device, str) or not device.strip():
+        return device
+    matches: list[tuple[int, str]] = []
+    for index, info in enumerate(sd.query_devices()):
+        if info.get("name") != device:
+            continue
+        channels_key = "max_input_channels" if input_direction else "max_output_channels"
+        if int(info.get(channels_key, 0)) < 1:
+            continue
+        hostapi = sd.query_hostapis(int(info["hostapi"]))["name"]
+        matches.append((index, str(hostapi)))
+    if not matches:
+        return device
+    wasapi = [index for index, hostapi in matches if hostapi == "Windows WASAPI"]
+    if wasapi:
+        return wasapi[0]
+    if len(matches) == 1:
+        return matches[0][0]
+    raise ValueError(
+        f"Multiple {'input' if input_direction else 'output'} devices found for {device!r}: "
+        + ", ".join(f"[{index}] {hostapi}" for index, hostapi in matches)
+    )
+
+
 def validate_capture_devices(sd: Any, input_device: int | str | None, output_device: int | str | None) -> None:
     """Reject host topologies that cannot safely open this full-duplex probe.
 
@@ -153,6 +180,24 @@ def validate_capture_devices(sd: Any, input_device: int | str | None, output_dev
             "endpoints safely. Select matching Windows WASAPI endpoints "
             f"instead (input host: {input_host}; output host: {output_host})."
         )
+
+
+def wasapi_extra_settings(sd: Any, input_device: int | str | None, output_device: int | str | None) -> Any:
+    """Allow shared WASAPI to convert mismatched endpoint sample rates."""
+
+    if not isinstance(input_device, int) or not isinstance(output_device, int):
+        return None
+    try:
+        input_info = sd.query_devices(input_device)
+        output_info = sd.query_devices(output_device)
+        input_host = sd.query_hostapis(int(input_info["hostapi"]))["name"]
+        output_host = sd.query_hostapis(int(output_info["hostapi"]))["name"]
+        if input_host != "Windows WASAPI" or output_host != "Windows WASAPI":
+            return None
+        settings = sd.WasapiSettings(exclusive=False, auto_convert=True)
+        return (settings, settings)
+    except Exception:
+        return None
 
 
 def build_impulse_schedule(
@@ -208,6 +253,8 @@ def run_capture(
     threshold: float,
 ) -> dict[str, Any]:
     sd = _load_sounddevice()
+    input_device = resolve_stream_device(sd, input_device, input_direction=True)
+    output_device = resolve_stream_device(sd, output_device, input_direction=False)
     validate_capture_devices(sd, input_device, output_device)
     interval_frames = max(block_size, round(sample_rate * impulse_interval))
     total_frames = max(1, round(sample_rate * seconds))
@@ -257,14 +304,18 @@ def run_capture(
 
     started = time.perf_counter()
     timeout_seconds = capture_timeout_seconds(total_frames, sample_rate)
-    with sd.Stream(
+    stream_kwargs = dict(
         samplerate=sample_rate,
         blocksize=block_size,
         dtype="float32",
         channels=1,
         device=(input_device, output_device),
         callback=callback,
-    ):
+    )
+    extra_settings = wasapi_extra_settings(sd, input_device, output_device)
+    if extra_settings is not None:
+        stream_kwargs["extra_settings"] = extra_settings
+    with sd.Stream(**stream_kwargs):
         while cursor < total_frames:
             elapsed = time.perf_counter() - started
             if elapsed >= timeout_seconds:

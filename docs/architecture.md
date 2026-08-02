@@ -278,7 +278,7 @@ This reduces risk but does not turn untrusted model files into guaranteed-safe c
 - Exported five-input RVC `.onnx` generators are connected to live inference; CUDA provider coverage and low-latency certification remain model-dependent.
 - The first converted block is silent while overlap state and output queues prime.
 - Model-library metadata is local to the current Windows profile and is not yet portable between machines.
-- A CABLE-A passthrough baseline has zero callback warnings; the latest exact-count run detected 100/100 impulses and measured 247.7 ms P50/P95. The native route has also passed an idle paired-model run with zero output peak and zero XRuns, while a 120-second realtime worker soak completed with zero deadline misses. Physical converted-speech latency and long native-route certification remain pending.
+- Historical CABLE-A runs reported 100/100 impulses, but the current WASAPI-selected, shared-rate probe returns 0/2 impulses on this machine with zero callback warnings. The native route has also passed an idle paired-model run with zero output peak and zero XRuns, while a 120-second realtime worker soak completed with zero deadline misses. Physical converted-speech latency and long native-route certification remain pending; use a known-good endpoint or repair the cable graph before treating loopback results as valid.
 
 ## Source map
 

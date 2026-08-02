@@ -14,8 +14,10 @@ from audio_validation import (  # noqa: E402
     capture_timeout_seconds,
     match_impulses,
     percentile,
+    resolve_stream_device,
     summarize_matches,
     validate_capture_devices,
+    wasapi_extra_settings,
 )
 
 
@@ -82,6 +84,38 @@ class AudioValidationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "WDM-KS"):
             validate_capture_devices(FakeSoundDevice(), 88, 85)
+
+    def test_named_endpoint_prefers_wasapi_instance(self) -> None:
+        class FakeSoundDevice:
+            @staticmethod
+            def query_devices():
+                return [
+                    {"name": "Cable", "hostapi": 0, "max_input_channels": 2, "max_output_channels": 0},
+                    {"name": "Cable", "hostapi": 1, "max_input_channels": 2, "max_output_channels": 0},
+                ]
+
+            @staticmethod
+            def query_hostapis(index):
+                return {"name": ["MME", "Windows WASAPI"][index]}
+
+        self.assertEqual(resolve_stream_device(FakeSoundDevice(), "Cable", input_direction=True), 1)
+
+    def test_wasapi_extra_settings_enable_shared_rate_conversion(self) -> None:
+        class FakeSoundDevice:
+            class WasapiSettings:
+                def __init__(self, **kwargs):
+                    self.kwargs = kwargs
+
+            @staticmethod
+            def query_devices(index):
+                return {"hostapi": index}
+
+            @staticmethod
+            def query_hostapis(index):
+                return {"name": "Windows WASAPI" if index in (1, 2) else "MME"}
+
+        settings = wasapi_extra_settings(FakeSoundDevice(), 1, 2)
+        self.assertEqual(settings[0].kwargs, {"exclusive": False, "auto_convert": True})
 
 
 if __name__ == "__main__":
