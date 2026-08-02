@@ -5,6 +5,8 @@ param(
     [string]$OutputDirectory = "outputs\reference-validation",
     [string]$InputDevice = "",
     [string]$OutputDevice = "",
+    [int]$InputSampleRate = 0,
+    [int]$OutputSampleRate = 0,
     [int]$AudioSeconds = 10,
     [int]$ImpulseCount = 0,
     [double]$SoakSeconds = 0,
@@ -46,6 +48,9 @@ if ($SoakSeconds -lt 0) {
 }
 if ($SoakChunkFrames -lt 0 -or $SoakExtraFrames -lt 0) {
     throw "Soak chunk and extra values cannot be negative."
+}
+if ($InputSampleRate -lt 0 -or $OutputSampleRate -lt 0) {
+    throw "InputSampleRate and OutputSampleRate cannot be negative."
 }
 if ($ConvertedRouteSeconds -lt 0) {
     throw "ConvertedRouteSeconds cannot be negative."
@@ -138,6 +143,8 @@ if (-not $SkipAudio) {
         "--report", $audioFile
     )
     if ($ImpulseCount -gt 0) { $audioArgs += @("--impulse-count", $ImpulseCount) }
+    if ($InputSampleRate -gt 0) { $audioArgs += @("--input-sample-rate", $InputSampleRate) }
+    if ($OutputSampleRate -gt 0) { $audioArgs += @("--output-sample-rate", $OutputSampleRate) }
     $commandPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {

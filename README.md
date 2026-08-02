@@ -356,6 +356,19 @@ For physical or virtual device validation, install the optional PortAudio wrappe
   --seconds 30 --report outputs\loopback.json
 ```
 
+If the endpoints advertise different rates (common with VB-CABLE, where
+capture may be 44.1 kHz and playback 48 kHz), pass both explicitly. The
+harness then opens independent input/output streams, matching the native
+CPAL route instead of forcing a misleading full-duplex clock:
+
+```powershell
+.\engine-python\.venv\Scripts\python.exe engine-python\tools\audio_validation.py `
+  --mode loopback --input-device "CABLE-A Output (VB-Audio Cable A)" `
+  --output-device "CABLE-A Input (VB-Audio Cable A)" `
+  --input-sample-rate 44100 --output-sample-rate 48000 `
+  --seconds 30 --impulse-count 100 --report outputs\loopback-split-rate.json
+```
+
 Use `--mode soak --seconds 7200` for a two-hour callback stability run. The harness reports callback warnings and P50/P95/min/max detected loopback delay; it does not replace a converted-audio soak through VC Next itself.
 
 For a converted-audio soak through the persistent RVC worker, use:

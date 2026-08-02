@@ -12,6 +12,8 @@ sys.path.insert(0, str(ENGINE_ROOT / "tools"))
 from audio_validation import (  # noqa: E402
     build_impulse_schedule,
     capture_timeout_seconds,
+    endpoint_default_sample_rate,
+    map_impulse_frames,
     match_impulses,
     percentile,
     resolve_stream_device,
@@ -116,6 +118,19 @@ class AudioValidationTests(unittest.TestCase):
 
         settings = wasapi_extra_settings(FakeSoundDevice(), 1, 2)
         self.assertEqual(settings[0].kwargs, {"exclusive": False, "auto_convert": True})
+
+    def test_split_rate_helpers_preserve_endpoint_clock_geometry(self) -> None:
+        class FakeSoundDevice:
+            @staticmethod
+            def query_devices(index):
+                return {"default_samplerate": 44_100.0 if index == 55 else 48_000.0}
+
+        self.assertEqual(endpoint_default_sample_rate(FakeSoundDevice(), 55, 48_000), 44_100)
+        self.assertEqual(endpoint_default_sample_rate(FakeSoundDevice(), 41, 48_000), 48_000)
+        self.assertEqual(
+            map_impulse_frames([480, 24_480], source_rate=48_000, target_rate=44_100),
+            [441, 22_491],
+        )
 
 
 if __name__ == "__main__":

@@ -180,7 +180,7 @@ The optional `tools/audio_validation.py` script measures a physical or virtual l
 .\engine-python\.venv\Scripts\python.exe engine-python\tools\audio_validation.py --mode loopback --seconds 30 --impulse-count 100 --report outputs\loopback.json
 ```
 
-The loopback mode can emit an exact impulse count and reports detected P50/P95/min/max delay. Soak mode records callback warnings, finite-sample status, and signal statistics without pretending to certify the VC Next conversion pipeline. For converted-worker timing, use `tools/live_worker_soak.py`; `--chunk-frames 10560 --extra-frames 25920` evaluates the measured intermediate 220/540 ms safety profile. Add `--realtime` when the worker should be paced to the 48 kHz audio timeline; reports then distinguish simulated audio duration from wall-clock duration.
+The loopback mode can emit an exact impulse count and reports detected P50/P95/min/max delay. If capture and playback endpoints have different advertised rates, pass `--input-sample-rate` and `--output-sample-rate`; the tool switches to independent streams and reports `topology: split-stream`. Soak mode records callback warnings, finite-sample status, and signal statistics without pretending to certify the VC Next conversion pipeline. For converted-worker timing, use `tools/live_worker_soak.py`; `--chunk-frames 10560 --extra-frames 25920` evaluates the measured intermediate 220/540 ms safety profile. Add `--realtime` when the worker should be paced to the 48 kHz audio timeline; reports then distinguish simulated audio duration from wall-clock duration.
 
 ## Security rules
 
