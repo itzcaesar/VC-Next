@@ -12,6 +12,16 @@ dist
 dist-ssr
 *.local
 
+# Python compatibility engine
+engine-python/.venv/
+engine-python/*.egg-info/
+engine-python/**/__pycache__/
+engine-python/.pytest_cache/
+*.pyc
+
+# Generated local audio probes
+outputs/*.wav
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
