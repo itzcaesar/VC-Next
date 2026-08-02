@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -10,6 +11,7 @@ use std::{
 use crossbeam_queue::ArrayQueue;
 
 pub const WORKER_CHUNK_FRAMES: usize = 480;
+pub const INFERENCE_SAMPLE_RATE: u32 = 48_000;
 
 pub struct BackendConfig {
     pub sample_rate: u32,
@@ -26,6 +28,14 @@ pub trait InferenceBackend: Send + 'static {
     fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<(), String>;
     fn reset(&mut self);
     fn inspect_capabilities(&self) -> BackendCapabilities;
+
+    /// Returns and clears a one-shot backend event for an input block that was
+    /// intentionally suppressed (for example, a stationary virtual-device
+    /// noise floor). Keeping this optional preserves the simple backend seam
+    /// for passthrough and test implementations.
+    fn take_silence_suppressed(&mut self) -> bool {
+        false
+    }
 }
 
 impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
@@ -43,6 +53,10 @@ impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
 
     fn inspect_capabilities(&self) -> BackendCapabilities {
         (**self).inspect_capabilities()
+    }
+
+    fn take_silence_suppressed(&mut self) -> bool {
+        (**self).take_silence_suppressed()
     }
 }
 
@@ -84,6 +98,7 @@ pub struct InferenceTelemetry {
     max_process_micros: AtomicU64,
     missed_deadlines: AtomicU64,
     dropped_output_frames: AtomicU64,
+    silence_suppressed_calls: AtomicU64,
     last_error: Mutex<Option<String>>,
 }
 
@@ -96,6 +111,7 @@ pub struct InferenceSnapshot {
     pub max_process_micros: u64,
     pub missed_deadlines: u64,
     pub dropped_output_frames: u64,
+    pub silence_suppressed_calls: u64,
     pub last_error: Option<String>,
 }
 
@@ -110,6 +126,7 @@ impl InferenceTelemetry {
             max_process_micros: AtomicU64::new(0),
             missed_deadlines: AtomicU64::new(0),
             dropped_output_frames: AtomicU64::new(0),
+            silence_suppressed_calls: AtomicU64::new(0),
             last_error: Mutex::new(None),
         }
     }
@@ -124,6 +141,7 @@ impl InferenceTelemetry {
             max_process_micros: self.max_process_micros.load(Ordering::Relaxed),
             missed_deadlines: self.missed_deadlines.load(Ordering::Relaxed),
             dropped_output_frames: self.dropped_output_frames.load(Ordering::Relaxed),
+            silence_suppressed_calls: self.silence_suppressed_calls.load(Ordering::Relaxed),
             last_error: self.last_error.lock().ok().and_then(|error| error.clone()),
         }
     }
@@ -135,15 +153,75 @@ pub struct InferenceWorker {
     telemetry: Arc<InferenceTelemetry>,
 }
 
+/// Small stateful linear resampler used off the audio callbacks. The RVC contract is
+/// 48 kHz, while Windows endpoints commonly run at 44.1, 48, or 96 kHz. Keeping the
+/// conversion here means the native callbacks remain bounded and the model always sees
+/// one stable sample rate.
+struct StreamingResampler {
+    step: f64,
+    position: f64,
+    buffer: VecDeque<f32>,
+}
+
+impl StreamingResampler {
+    fn new(source_rate: u32, target_rate: u32) -> Self {
+        Self {
+            step: source_rate as f64 / target_rate as f64,
+            position: 0.0,
+            buffer: VecDeque::with_capacity(WORKER_CHUNK_FRAMES * 4),
+        }
+    }
+
+    fn push(&mut self, sample: f32) {
+        self.buffer.push_back(sample);
+    }
+
+    fn available_output(&self) -> usize {
+        if self.buffer.len() < 2 {
+            return 0;
+        }
+        let available_position = (self.buffer.len() - 1) as f64;
+        if self.position > available_position {
+            return 0;
+        }
+        ((available_position - self.position) / self.step).floor() as usize + 1
+    }
+
+    fn process_into(&mut self, output: &mut [f32]) -> bool {
+        if output.is_empty() {
+            return true;
+        }
+        if self.available_output() < output.len() {
+            return false;
+        }
+
+        for sample in output.iter_mut() {
+            let base = self.position.floor() as usize;
+            let fraction = (self.position - base as f64) as f32;
+            let first = self.buffer[base];
+            let second = self.buffer[base + 1];
+            *sample = first + (second - first) * fraction;
+            self.position += self.step;
+        }
+
+        let consumed = self.position.floor() as usize;
+        if consumed > 0 {
+            self.buffer.drain(..consumed);
+            self.position -= consumed as f64;
+        }
+        true
+    }
+}
+
 impl InferenceWorker {
     pub fn start<B: InferenceBackend>(
         mut backend: B,
         input: Arc<ArrayQueue<f32>>,
         output: Arc<ArrayQueue<f32>>,
-        sample_rate: u32,
+        source_sample_rate: u32,
     ) -> Result<Self, String> {
         let config = BackendConfig {
-            sample_rate,
+            sample_rate: INFERENCE_SAMPLE_RATE,
             chunk_frames: WORKER_CHUNK_FRAMES,
         };
         let capabilities = backend.inspect_capabilities();
@@ -153,26 +231,48 @@ impl InferenceWorker {
         let worker_telemetry = Arc::clone(&telemetry);
         let stop_requested = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop_requested);
-        let chunk_budget_micros = (WORKER_CHUNK_FRAMES as u64 * 1_000_000) / sample_rate as u64;
+        let chunk_budget_micros =
+            (WORKER_CHUNK_FRAMES as u64 * 1_000_000) / INFERENCE_SAMPLE_RATE as u64;
 
         let handle = thread::Builder::new()
             .name("vc-next-inference".to_owned())
             .spawn(move || {
                 let mut input_chunk = vec![0.0_f32; WORKER_CHUNK_FRAMES];
                 let mut output_chunk = vec![0.0_f32; WORKER_CHUNK_FRAMES];
+                let mut input_resampler =
+                    StreamingResampler::new(source_sample_rate, INFERENCE_SAMPLE_RATE);
 
                 while !worker_stop.load(Ordering::Acquire) {
-                    if input.len() < WORKER_CHUNK_FRAMES {
-                        thread::sleep(Duration::from_micros(250));
-                        continue;
-                    }
+                    if source_sample_rate == INFERENCE_SAMPLE_RATE {
+                        if input.len() < WORKER_CHUNK_FRAMES {
+                            thread::sleep(Duration::from_micros(250));
+                            continue;
+                        }
 
-                    for sample in &mut input_chunk {
-                        *sample = input.pop().unwrap_or(0.0);
+                        for sample in &mut input_chunk {
+                            *sample = input.pop().unwrap_or(0.0);
+                        }
+                    } else {
+                        while input_resampler.available_output() < WORKER_CHUNK_FRAMES {
+                            let Some(sample) = input.pop() else {
+                                break;
+                            };
+                            input_resampler.push(sample);
+                        }
+                        if !input_resampler.process_into(&mut input_chunk) {
+                            thread::sleep(Duration::from_micros(250));
+                            continue;
+                        }
                     }
 
                     let started = Instant::now();
-                    if let Err(error) = backend.process(&input_chunk, &mut output_chunk) {
+                    let process_result = backend.process(&input_chunk, &mut output_chunk);
+                    if backend.take_silence_suppressed() {
+                        worker_telemetry
+                            .silence_suppressed_calls
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    if let Err(error) = process_result {
                         if let Ok(mut last_error) = worker_telemetry.last_error.lock() {
                             *last_error = Some(error);
                         }
@@ -240,6 +340,35 @@ impl Drop for InferenceWorker {
 mod tests {
     use super::*;
 
+    struct EventBackend {
+        silence_event: bool,
+    }
+
+    impl InferenceBackend for EventBackend {
+        fn prepare(&mut self, _config: &BackendConfig) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<(), String> {
+            output.copy_from_slice(input);
+            self.silence_event = true;
+            Ok(())
+        }
+
+        fn reset(&mut self) {}
+
+        fn inspect_capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                name: "test event backend",
+                stateful: false,
+            }
+        }
+
+        fn take_silence_suppressed(&mut self) -> bool {
+            std::mem::take(&mut self.silence_event)
+        }
+    }
+
     #[test]
     fn noop_backend_preserves_samples() {
         let mut backend = NoopInferenceBackend;
@@ -264,6 +393,31 @@ mod tests {
                 chunk_frames: WORKER_CHUNK_FRAMES,
             })
             .is_err());
+    }
+
+    #[test]
+    fn streaming_resampler_preserves_constant_signal_across_rates() {
+        let mut resampler = StreamingResampler::new(44_100, INFERENCE_SAMPLE_RATE);
+        for _ in 0..1_000 {
+            resampler.push(0.25);
+        }
+        let mut output = [0.0_f32; WORKER_CHUNK_FRAMES];
+        assert!(resampler.process_into(&mut output));
+        assert!(output.iter().all(|sample| (*sample - 0.25).abs() < 1e-6));
+    }
+
+    #[test]
+    fn streaming_resampler_waits_for_enough_source_frames() {
+        let mut resampler = StreamingResampler::new(96_000, INFERENCE_SAMPLE_RATE);
+        for _ in 0..WORKER_CHUNK_FRAMES {
+            resampler.push(0.5);
+        }
+        let mut output = [0.0_f32; WORKER_CHUNK_FRAMES];
+        assert!(!resampler.process_into(&mut output));
+        for _ in 0..WORKER_CHUNK_FRAMES {
+            resampler.push(0.5);
+        }
+        assert!(resampler.process_into(&mut output));
     }
 
     #[test]
@@ -299,5 +453,32 @@ mod tests {
         assert_eq!(snapshot.processed_frames, WORKER_CHUNK_FRAMES as u64);
         assert_eq!(snapshot.process_calls, 1);
         assert_eq!(snapshot.missed_deadlines, 0);
+    }
+
+    #[test]
+    fn worker_records_optional_silence_suppression_events() {
+        let input = Arc::new(ArrayQueue::new(WORKER_CHUNK_FRAMES * 2));
+        let output = Arc::new(ArrayQueue::new(WORKER_CHUNK_FRAMES * 2));
+        for _ in 0..WORKER_CHUNK_FRAMES {
+            input.push(0.0).unwrap();
+        }
+
+        let mut worker = InferenceWorker::start(
+            EventBackend {
+                silence_event: false,
+            },
+            Arc::clone(&input),
+            Arc::clone(&output),
+            48_000,
+        )
+        .unwrap();
+        let telemetry = worker.telemetry();
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while telemetry.snapshot().silence_suppressed_calls == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        worker.stop();
+
+        assert_eq!(telemetry.snapshot().silence_suppressed_calls, 1);
     }
 }
