@@ -3,7 +3,12 @@ mod inference;
 mod live_sidecar;
 mod sidecar;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{Arc, Mutex},
+};
 
 use audio::{AudioDeviceSnapshot, AudioEngine, AudioEngineStatus, AudioProcessingSettings};
 use live_sidecar::LiveRvcService;
@@ -25,24 +30,112 @@ where
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SystemProfile {
-    os: &'static str,
-    gpu: &'static str,
+    os: String,
+    gpu: String,
     vram_mb: u32,
-    driver_version: &'static str,
-    source: &'static str,
+    driver_version: String,
+    source: String,
 }
 
 #[tauri::command]
-fn get_system_profile() -> SystemProfile {
-    // Phase 0 records the reference machine explicitly. A native DXGI/NVML probe
-    // replaces these baseline values when the audio-engine spike begins.
-    SystemProfile {
-        os: "Windows 11",
-        gpu: "NVIDIA GeForce RTX 4050 Laptop GPU",
-        vram_mb: 6141,
-        driver_version: "610.62",
-        source: "prototype-baseline",
+async fn get_system_profile() -> Result<SystemProfile, String> {
+    run_blocking("System profile probe", || Ok(detect_system_profile())).await
+}
+
+fn detect_system_profile() -> SystemProfile {
+    let os = if cfg!(windows) {
+        "Windows".to_owned()
+    } else {
+        std::env::consts::OS.to_owned()
+    };
+
+    if let Some((gpu, vram_mb, driver_version)) = probe_nvidia_smi() {
+        return SystemProfile {
+            os,
+            gpu,
+            vram_mb,
+            driver_version,
+            source: "native-probe".to_owned(),
+        };
     }
+
+    if let Some((gpu, vram_mb, driver_version)) = probe_windows_video_controller() {
+        return SystemProfile {
+            os,
+            gpu,
+            vram_mb,
+            driver_version,
+            source: "native-probe".to_owned(),
+        };
+    }
+
+    SystemProfile {
+        os,
+        gpu: "Unknown GPU".to_owned(),
+        vram_mb: 0,
+        driver_version: "Unavailable".to_owned(),
+        source: "native-probe".to_owned(),
+    }
+}
+
+fn probe_nvidia_smi() -> Option<(String, u32, String)> {
+    let output = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,memory.total,driver_version",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    parse_nvidia_smi_line(line)
+}
+
+fn parse_nvidia_smi_line(line: &str) -> Option<(String, u32, String)> {
+    let mut fields = line.splitn(3, ',').map(str::trim);
+    let gpu = fields.next()?.to_owned();
+    let vram_mb = fields.next()?.parse::<u32>().ok()?;
+    let driver = fields.next()?.to_owned();
+    if gpu.is_empty() || driver.is_empty() {
+        return None;
+    }
+    Some((gpu, vram_mb, driver))
+}
+
+fn probe_windows_video_controller() -> Option<(String, u32, String)> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let script = r#"Get-CimInstance Win32_VideoController | Select-Object -First 1 Name,AdapterRAM,DriverVersion | ConvertTo-Json -Compress"#;
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let gpu = value.get("Name")?.as_str()?.trim().to_owned();
+    let driver = value
+        .get("DriverVersion")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Unavailable")
+        .trim()
+        .to_owned();
+    let vram_bytes = value
+        .get("AdapterRAM")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    if gpu.is_empty() {
+        return None;
+    }
+    Some((gpu, (vram_bytes / 1_048_576) as u32, driver))
 }
 
 #[tauri::command]
@@ -59,6 +152,9 @@ async fn start_audio_engine(
     output_gain_db: f32,
     monitor_gain_db: f32,
     noise_gate_db: f32,
+    noise_suppression_strength: f32,
+    echo_control_strength: f32,
+    high_pass_enabled: bool,
     engine: tauri::State<'_, SharedAudioEngine>,
     live_rvc: tauri::State<'_, SharedLiveRvcService>,
 ) -> Result<AudioEngineStatus, String> {
@@ -70,7 +166,10 @@ async fn start_audio_engine(
             output_gain_db,
             monitor_gain_db,
             noise_gate_db,
-        )?;
+            noise_suppression_strength,
+            echo_control_strength,
+        )?
+        .with_high_pass(high_pass_enabled);
         let live_client = live_rvc
             .lock()
             .map_err(|_| "The live RVC service lock is unavailable.".to_owned())?
@@ -85,6 +184,26 @@ async fn start_audio_engine(
                 live_client,
                 processing,
             )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn restart_audio_engine(
+    engine: tauri::State<'_, SharedAudioEngine>,
+    live_rvc: tauri::State<'_, SharedLiveRvcService>,
+) -> Result<AudioEngineStatus, String> {
+    let engine = Arc::clone(engine.inner());
+    let live_rvc = Arc::clone(live_rvc.inner());
+    run_blocking("Audio engine recovery", move || {
+        let live_client = live_rvc
+            .lock()
+            .map_err(|_| "The live RVC service lock is unavailable.".to_owned())?
+            .ready_client();
+        engine
+            .lock()
+            .map_err(|_| "The audio engine lock is unavailable.".to_owned())?
+            .restart(live_client)
     })
     .await
 }
@@ -123,9 +242,97 @@ async fn probe_inference_runtime() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
+async fn open_runtime_setup() -> Result<String, String> {
+    run_blocking("Runtime setup", || sidecar::open_runtime_setup()).await
+}
+
+#[tauri::command]
 async fn inspect_rvc_model(path: String) -> Result<serde_json::Value, String> {
     run_blocking("RVC model inspection", move || {
         sidecar::inspect_model(&path)
+    })
+    .await
+}
+
+const MODEL_SCAN_MAX_DEPTH: usize = 4;
+
+fn is_supported_model_file(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase());
+    if extension.as_deref() == Some("pth") {
+        return true;
+    }
+    if extension.as_deref() != Some("onnx") {
+        return false;
+    }
+    // A w-okada install also contains ContentVec, HuBERT, and RMVPE ONNX
+    // assets. They are feature extractors, not importable voice generators.
+    let name = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    !["contentvec", "hubert", "rmvpe", "embedder", "pitch"]
+        .iter()
+        .any(|marker| name.contains(marker))
+}
+
+fn scan_model_directory(
+    directory: &Path,
+    depth: usize,
+    models: &mut Vec<String>,
+) -> Result<(), String> {
+    if depth > MODEL_SCAN_MAX_DEPTH {
+        return Ok(());
+    }
+    let entries = fs::read_dir(directory).map_err(|error| {
+        format!(
+            "Could not read model folder {}: {error}",
+            directory.display()
+        )
+    })?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Could not inspect a model-folder entry: {error}"))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            scan_model_directory(&path, depth + 1, models)?;
+        } else if file_type.is_file() && is_supported_model_file(&path) {
+            models.push(path.to_string_lossy().into_owned());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn discover_rvc_models(path: String) -> Result<Vec<String>, String> {
+    run_blocking("RVC model folder scan", move || {
+        let root = PathBuf::from(path)
+            .canonicalize()
+            .map_err(|error| format!("The selected model folder could not be opened: {error}"))?;
+        if !root.is_dir() {
+            return Err("Choose a folder containing RVC .pth or .onnx files.".to_owned());
+        }
+        let mut models = Vec::new();
+        scan_model_directory(&root, 0, &mut models)?;
+        models.sort_by_key(|model| model.to_ascii_lowercase());
+        models.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        if models.is_empty() {
+            return Err(format!(
+                "No .pth or .onnx voice models were found within {} levels of {}.",
+                MODEL_SCAN_MAX_DEPTH,
+                root.display()
+            ));
+        }
+        Ok(models)
     })
     .await
 }
@@ -230,6 +437,20 @@ async fn get_live_rvc_status(
 }
 
 #[tauri::command]
+async fn calibrate_live_rvc(
+    live_rvc: tauri::State<'_, SharedLiveRvcService>,
+) -> Result<serde_json::Value, String> {
+    let live_rvc = Arc::clone(live_rvc.inner());
+    run_blocking("RVC stream calibration", move || {
+        live_rvc
+            .lock()
+            .map_err(|_| "The live RVC service lock is unavailable.".to_owned())?
+            .calibrate()
+    })
+    .await
+}
+
+#[tauri::command]
 async fn unload_live_rvc_model(
     engine: tauri::State<'_, SharedAudioEngine>,
     live_rvc: tauri::State<'_, SharedLiveRvcService>,
@@ -263,16 +484,51 @@ pub fn run() {
             get_system_profile,
             get_audio_devices,
             start_audio_engine,
+            restart_audio_engine,
             stop_audio_engine,
             get_audio_engine_status,
             probe_inference_runtime,
+            open_runtime_setup,
             inspect_rvc_model,
+            discover_rvc_models,
             inspect_trusted_rvc_checkpoint,
             load_live_rvc_model,
             set_live_rvc_settings,
             get_live_rvc_status,
+            calibrate_live_rvc,
             unload_live_rvc_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running VC Next");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_supported_model_file, parse_nvidia_smi_line};
+    use std::path::Path;
+
+    #[test]
+    fn parses_nvidia_smi_profile_line() {
+        let profile = parse_nvidia_smi_line("NVIDIA GeForce RTX 4050 Laptop GPU, 6141, 610.62")
+            .expect("profile line should parse");
+        assert_eq!(profile.0, "NVIDIA GeForce RTX 4050 Laptop GPU");
+        assert_eq!(profile.1, 6141);
+        assert_eq!(profile.2, "610.62");
+    }
+
+    #[test]
+    fn rejects_malformed_nvidia_smi_profile_line() {
+        assert!(parse_nvidia_smi_line("NVIDIA,not-a-number,610.62").is_none());
+        assert!(parse_nvidia_smi_line("NVIDIA,6141").is_none());
+    }
+
+    #[test]
+    fn model_folder_scan_accepts_only_rvc_checkpoint_formats() {
+        assert!(is_supported_model_file(Path::new("voice.PTH")));
+        assert!(is_supported_model_file(Path::new("voice.onnx")));
+        assert!(!is_supported_model_file(Path::new("contentvec-f.onnx")));
+        assert!(!is_supported_model_file(Path::new("rmvpe_20231006.onnx")));
+        assert!(!is_supported_model_file(Path::new("voice.index")));
+        assert!(!is_supported_model_file(Path::new("voice.wav")));
+    }
 }

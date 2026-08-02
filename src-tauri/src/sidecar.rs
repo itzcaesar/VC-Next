@@ -58,6 +58,32 @@ pub fn probe_runtime() -> Result<Value, String> {
     call("probe_runtime", json!({}))
 }
 
+/// Open the visible first-run runtime bootstrap in a separate PowerShell
+/// window. This is intentionally not run inside the Tauri command thread: pip
+/// installs and CUDA package downloads can take several minutes, and the user
+/// needs to see their progress and any driver/package error directly.
+pub fn open_runtime_setup() -> Result<String, String> {
+    let engine_dir = engine_directory()?;
+    let script = runtime_setup_script(&engine_dir)?;
+    if !cfg!(windows) {
+        return Err("The VC Next runtime bootstrap currently supports Windows only.".to_owned());
+    }
+
+    Command::new("powershell.exe")
+        .args([
+            OsString::from("-NoProfile"),
+            OsString::from("-ExecutionPolicy"),
+            OsString::from("Bypass"),
+            OsString::from("-NoExit"),
+            OsString::from("-File"),
+        ])
+        .arg(&script)
+        .current_dir(&engine_dir)
+        .spawn()
+        .map_err(|error| format!("Could not open the runtime setup window: {error}"))?;
+    Ok(script.display().to_string())
+}
+
 pub fn inspect_model(path: &str) -> Result<Value, String> {
     call("inspect_model", json!({ "path": path }))
 }
@@ -161,18 +187,52 @@ fn call_candidate(
 
 pub(crate) fn engine_directory() -> Result<PathBuf, String> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let Some(project_root) = manifest.parent() else {
-        return Err("Could not resolve the VC Next project root.".to_owned());
-    };
-    let engine_dir = project_root.join("engine-python");
-    if engine_dir.join("vc_next_sidecar").is_dir() {
-        Ok(engine_dir)
-    } else {
-        Err(format!(
-            "The Python sidecar package is missing at {}.",
-            engine_dir.display()
-        ))
+    let mut candidates = Vec::new();
+    if let Some(project_root) = manifest.parent() {
+        candidates.push(project_root.join("engine-python"));
     }
+    if let Some(configured) = env::var_os("VC_NEXT_ENGINE_DIR").filter(|path| !path.is_empty()) {
+        candidates.insert(0, PathBuf::from(configured));
+    }
+    if let Ok(executable) = env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            candidates.push(parent.join("engine-python"));
+            candidates.push(parent.join("resources").join("engine-python"));
+        }
+    }
+    if let Ok(current) = env::current_dir() {
+        candidates.push(current.join("engine-python"));
+    }
+
+    for candidate in &candidates {
+        if candidate.join("vc_next_sidecar").is_dir() {
+            return Ok(candidate.clone());
+        }
+    }
+    let searched = candidates
+        .iter()
+        .map(|candidate| candidate.display().to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!(
+        "The Python sidecar package could not be found. Searched: {searched}"
+    ))
+}
+
+fn runtime_setup_script(engine_dir: &Path) -> Result<PathBuf, String> {
+    let mut candidates = vec![engine_dir.join("setup-runtime.ps1")];
+    if let Some(project_root) = engine_dir.parent() {
+        candidates.push(project_root.join("scripts").join("setup-runtime.ps1"));
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            format!(
+                "The VC Next runtime setup script could not be found beside {}.",
+                engine_dir.display()
+            )
+        })
 }
 
 pub(crate) fn python_candidates(engine_dir: &Path) -> Vec<PythonCandidate> {
@@ -192,6 +252,21 @@ pub(crate) fn python_candidates(engine_dir: &Path) -> Vec<PythonCandidate> {
             .join("python.exe");
         if project_venv.is_file() {
             candidates.push(PythonCandidate::executable(project_venv));
+        }
+    }
+
+    // A packaged installer may live under Program Files, where the bundled
+    // resources are intentionally read-only. setup-runtime.ps1 then places
+    // the venv under the user's LocalAppData directory instead.
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA").filter(|path| !path.is_empty()) {
+        let user_venv = PathBuf::from(local_app_data)
+            .join("VC Next")
+            .join("engine-python")
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe");
+        if user_venv.is_file() {
+            candidates.push(PythonCandidate::executable(user_venv));
         }
     }
 
@@ -221,5 +296,11 @@ mod tests {
     fn long_sidecar_errors_are_bounded() {
         let message = "failure ".repeat(100);
         assert_eq!(compact_message(&message).chars().count(), 300);
+    }
+
+    #[test]
+    fn runtime_setup_script_is_available_from_source_checkout() {
+        let engine = engine_directory().unwrap();
+        assert!(runtime_setup_script(&engine).unwrap().is_file());
     }
 }

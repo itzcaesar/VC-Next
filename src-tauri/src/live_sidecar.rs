@@ -31,8 +31,20 @@ const SHUTDOWN: u8 = 6;
 const LIVE_SAMPLE_RATE: u32 = 48_000;
 pub const LIVE_CHUNK_FRAMES: usize = 9_600;
 const LIVE_ANALYSIS_FRAMES: usize = 24_000;
-const LIVE_CROSSFADE_FRAMES: usize = 1_920;
+const LIVE_CROSSFADE_FRAMES: usize = 4_096;
 const LIVE_SOLA_SEARCH_FRAMES: usize = 576;
+// Keep a native backstop in front of the sidecar. The Python worker has the
+// authoritative gate, but suppressing an idle block here also protects the
+// output route if a virtual device reports a short-lived floor or the model
+// worker is recovering while its queue still contains a stale tail.
+// The native boundary sees the device's full-rate idle floor before the
+// Python hop gate. A slightly higher floor covers the ~-49 dBFS Voicemeeter
+// return observed on the reference machine while the activity-ratio escape
+// hatch keeps a short quiet syllable audible.
+const SILENCE_RMS_THRESHOLD: f32 = 0.004;
+const SILENCE_PEAK_THRESHOLD: f32 = 0.0015;
+const SILENCE_ACTIVITY_RATIO: f32 = 0.02;
+const SILENCE_ACTIVITY_MULTIPLIER: f32 = 1.1;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
 const MODEL_LOAD_TIMEOUT: Duration = Duration::from_secs(120);
@@ -770,6 +782,14 @@ impl LiveRvcService {
         Ok(self.status_with_health())
     }
 
+    pub fn calibrate(&mut self) -> Result<Value, String> {
+        let worker = self
+            .worker
+            .as_ref()
+            .ok_or_else(|| "No persistent RVC worker is running.".to_owned())?;
+        worker.client.control("calibrate", json!({}))
+    }
+
     pub fn unload(&mut self) -> Result<Value, String> {
         if let Some(worker) = &self.worker {
             self.status = worker.client.control("unload", json!({}))?;
@@ -799,7 +819,7 @@ fn empty_status() -> Value {
         "analysisFrames": LIVE_ANALYSIS_FRAMES,
         "analysisMilliseconds": 500.0,
         "crossfadeFrames": LIVE_CROSSFADE_FRAMES,
-        "crossfadeMilliseconds": 40.0,
+        "crossfadeMilliseconds": 85.3333333333,
         "solaSearchFrames": LIVE_SOLA_SEARCH_FRAMES,
         "solaSearchMilliseconds": 12.0,
         "streamPrimed": false,
@@ -813,7 +833,7 @@ fn empty_status() -> Value {
         "indexRatio": 0.0,
         "protectRatio": 0.5,
         "f0Method": "RMVPE",
-        "f0Threshold": 0.03,
+        "f0Threshold": 0.30,
         "streamingPreset": "balanced",
         "processCalls": 0,
         "lastProcessMs": 0.0,
@@ -829,6 +849,9 @@ pub struct LiveRvcInferenceBackend {
     input_accumulator: Vec<f32>,
     output_queue: VecDeque<f32>,
     pending: Option<Receiver<Result<Vec<f32>, String>>>,
+    drop_pending_output: bool,
+    silence_active: bool,
+    silence_suppressed_event: bool,
     live_chunk_frames: usize,
     max_backlog_frames: usize,
 }
@@ -841,6 +864,9 @@ impl LiveRvcInferenceBackend {
             input_accumulator: Vec::with_capacity(live_chunk_frames * 2),
             output_queue: VecDeque::with_capacity(live_chunk_frames),
             pending: None,
+            drop_pending_output: false,
+            silence_active: false,
+            silence_suppressed_event: false,
             live_chunk_frames,
             max_backlog_frames: live_chunk_frames * 4,
         }
@@ -853,11 +879,22 @@ impl LiveRvcInferenceBackend {
         match pending.try_recv() {
             Ok(result) => {
                 self.pending = None;
-                let converted = result?;
+                let converted = match result {
+                    Ok(converted) => converted,
+                    Err(error) => {
+                        self.drop_pending_output = false;
+                        return Err(error);
+                    }
+                };
                 if converted.len() != self.live_chunk_frames {
                     return Err("The live RVC worker returned an invalid frame count.".to_owned());
                 }
-                self.output_queue.extend(converted);
+                if self.drop_pending_output || self.silence_active {
+                    self.drop_pending_output = false;
+                    self.output_queue.clear();
+                } else {
+                    self.output_queue.extend(converted);
+                }
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
@@ -897,7 +934,19 @@ impl InferenceBackend for LiveRvcInferenceBackend {
                 .input_accumulator
                 .drain(..self.live_chunk_frames)
                 .collect::<Vec<_>>();
-            self.pending = Some(self.client.process_audio_async(chunk)?);
+            self.silence_active = is_silent_live_block(&chunk);
+            if self.silence_active {
+                self.silence_suppressed_event = true;
+                self.output_queue.clear();
+                if self.pending.is_some() {
+                    self.drop_pending_output = true;
+                }
+            } else {
+                self.pending = Some(self.client.process_audio_async(chunk)?);
+            }
+        }
+        if self.silence_active {
+            self.output_queue.clear();
         }
         for sample in output {
             *sample = self.output_queue.pop_front().unwrap_or(0.0);
@@ -909,6 +958,9 @@ impl InferenceBackend for LiveRvcInferenceBackend {
         self.input_accumulator.clear();
         self.output_queue.clear();
         self.pending = None;
+        self.drop_pending_output = false;
+        self.silence_active = false;
+        self.silence_suppressed_event = false;
     }
 
     fn inspect_capabilities(&self) -> BackendCapabilities {
@@ -917,6 +969,34 @@ impl InferenceBackend for LiveRvcInferenceBackend {
             stateful: true,
         }
     }
+
+    fn take_silence_suppressed(&mut self) -> bool {
+        std::mem::take(&mut self.silence_suppressed_event)
+    }
+}
+
+fn is_silent_live_block(samples: &[f32]) -> bool {
+    if samples.is_empty() {
+        return true;
+    }
+    let mut sum = 0.0_f64;
+    let mut peak = 0.0_f32;
+    for &sample in samples {
+        let value = if sample.is_finite() { sample } else { 0.0 };
+        sum += f64::from(value) * f64::from(value);
+        peak = peak.max(value.abs());
+    }
+    let rms = (sum / samples.len() as f64).sqrt() as f32;
+    if rms > SILENCE_RMS_THRESHOLD || peak <= 0.0 {
+        return rms <= SILENCE_RMS_THRESHOLD;
+    }
+    let activity_floor =
+        (SILENCE_PEAK_THRESHOLD * 2.0).max(SILENCE_RMS_THRESHOLD * SILENCE_ACTIVITY_MULTIPLIER);
+    let active = samples
+        .iter()
+        .filter(|sample| sample.is_finite() && sample.abs() >= activity_floor)
+        .count();
+    (active as f32 / samples.len() as f32) < SILENCE_ACTIVITY_RATIO
 }
 
 #[cfg(test)]
@@ -950,6 +1030,28 @@ mod tests {
     fn empty_service_has_no_ready_client() {
         let service = LiveRvcService::default();
         assert!(service.ready_client().is_none());
+    }
+
+    #[test]
+    fn native_idle_backstop_rejects_virtual_floor_and_isolated_spikes() {
+        let floor = vec![0.0012_f32; LIVE_CHUNK_FRAMES];
+        assert!(is_silent_live_block(&floor));
+
+        let elevated_floor = vec![0.0035_f32; LIVE_CHUNK_FRAMES];
+        assert!(is_silent_live_block(&elevated_floor));
+
+        let mut spike = vec![0.0_f32; LIVE_CHUNK_FRAMES];
+        spike[LIVE_CHUNK_FRAMES / 2] = 0.008;
+        assert!(is_silent_live_block(&spike));
+    }
+
+    #[test]
+    fn native_idle_backstop_keeps_quiet_concentrated_speech() {
+        let mut speech = vec![0.0_f32; LIVE_CHUNK_FRAMES];
+        for sample in speech.iter_mut().take(1_200) {
+            *sample = 0.005;
+        }
+        assert!(!is_silent_live_block(&speech));
     }
 
     #[test]
