@@ -160,7 +160,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let index_ratio: f64 = parse(args, "--index-ratio", 0.30)?;
     let protect_ratio: f64 = parse(args, "--protect", 0.50)?;
     let chunk_frames: usize = parse(args, "--chunk", 24_000)?;
-    let extra_frames: usize = parse(args, "--extra", 32_768)?;
+    let extra_frames: usize = parse(args, "--extra", 24_000)?;
     let preset = option(args, "--preset").unwrap_or_else(|| "quality".to_owned());
     let high_pass = has_flag(args, "--high-pass");
     let report_path = option(args, "--report");

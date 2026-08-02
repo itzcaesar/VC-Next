@@ -12,7 +12,7 @@ param(
     [double]$IndexRatio = 0.3,
     [double]$ProtectRatio = 0.5,
     [int]$ChunkFrames = 24000,
-    [int]$ExtraFrames = 32768,
+    [int]$ExtraFrames = 24000,
     [string]$ReportPath = "",
     [switch]$HighPass,
     [ValidateSet("quality", "balanced", "latency")]
