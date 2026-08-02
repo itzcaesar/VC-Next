@@ -10,6 +10,8 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+target-package-check/
+release/
 *.local
 
 # Python compatibility engine
@@ -21,6 +23,12 @@ engine-python/.pytest_cache/
 
 # Generated local audio probes
 outputs/*.wav
+outputs/*.json
+outputs/reference-validation/
+outputs/clean-install-*/
+outputs/*.txt
+outputs/*.err
+outputs/*.out
 
 # Editor directories and files
 .vscode/*

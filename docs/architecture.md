@@ -137,7 +137,14 @@ Output and monitor devices have independent hardware clocks. Each route therefor
 4. performs bounded drop/repeat correction when queue depth drifts;
 5. reports reprimes and clock corrections separately for output and monitor.
 
-This is a stability mechanism, not a high-quality continuous sample-rate converter. A controlled resampler remains a future option if long-session measurements justify it.
+The native boundary also contains bounded stateful linear resamplers: endpoint input is converted to the fixed 48 kHz inference contract, while converted output and monitor samples are converted to each device's native rate. This is deliberately conservative for real-time safety; higher-order quality and long-session drift measurements remain open work.
+
+The monitor route is optional at startup. A Windows endpoint can be unavailable
+even while its device entry remains enumerated (for example, when another
+application owns it or its shared format changes). In that case the native
+host keeps capture and converted output running, disables only the monitor
+callback, and exposes the bounded failure through `lastError` instead of
+turning a monitor problem into a full-session startup failure.
 
 ## Inference interface
 
@@ -218,11 +225,12 @@ During recovery, the native pipeline remains alive and safely emits silence wher
 | --- | --- | --- |
 | `get_system_profile` | Reports the Windows/GPU reference profile | Diagnostic only |
 | `get_audio_devices` | Enumerates active input and output endpoints | Runs off the UI thread |
-| `start_audio_engine` | Starts capture, inference, output, and optional monitor | Requires valid same-rate devices |
+| `start_audio_engine` | Starts capture, inference, output, and optional monitor | Native boundary resamples endpoint rates to the fixed 48 kHz live path |
 | `get_audio_engine_status` | Returns peaks, queue depth, xruns, timings, and corrections | Snapshot; does not block callbacks |
 | `stop_audio_engine` | Deterministically drops the native streams | Safe to call repeatedly |
 | `probe_inference_runtime` | Checks Python, packages, Torch, and CUDA | Runs in the project-local environment |
 | `inspect_rvc_model` | Performs metadata-only inspection | Does not deserialize `.pth` |
+| `discover_rvc_models` | Scans a selected w-okada/model folder for importable `.pth` and generator `.onnx` files | Bounded depth; skips symlinks and known feature-extractor ONNX assets |
 | `inspect_trusted_rvc_checkpoint` | Validates a trusted checkpoint with weights-only loading | `.pth` compatibility path |
 | `load_live_rvc_model` | Loads assets, validates settings, and warms CUDA | Audio must be stopped |
 | `set_live_rvc_settings` | Applies pitch, retrieval, protection, speaker, F0, and stream geometry | Used before the next session |
@@ -259,12 +267,12 @@ This reduces risk but does not turn untrusted model files into guaranteed-safe c
 ## Known architectural limits
 
 - Windows/NVIDIA is the only reference target.
-- Device endpoints must currently expose matching default sample rates.
+- Endpoint rates can differ; the native boundary resamples them to the fixed 48 kHz live path. Higher-order resampler QA is still pending.
 - CPAL uses shared-mode device defaults rather than an exclusive/event-driven tuning pass.
-- RVC `.onnx` files are inspectable but not connected to live inference.
+- Exported five-input RVC `.onnx` generators are connected to live inference; CUDA provider coverage and low-latency certification remain model-dependent.
 - The first converted block is silent while overlap state and output queues prime.
 - Model-library metadata is local to the current Windows profile and is not yet portable between machines.
-- Physical loopback latency and long converted-audio soak tests remain pending.
+- A CABLE-A passthrough baseline has zero callback warnings; the latest exact-count run detected 100/100 impulses and measured 247.7 ms P50/P95. The native route has also passed an idle paired-model run with zero output peak and zero XRuns, while a 120-second realtime worker soak completed with zero deadline misses. Physical converted-speech latency and long native-route certification remain pending.
 
 ## Source map
 

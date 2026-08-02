@@ -54,6 +54,14 @@ The verified Windows/NVIDIA baseline is:
 
 Create the environment from the repository root:
 
+The supported automated setup is:
+
+```powershell
+npm run runtime:setup
+```
+
+It is idempotent, installs the verified Windows/NVIDIA baseline, and runs a readiness probe. Use `-SkipTorch` or `-SkipOptional` only when those dependencies are managed separately; skipping ONNX Runtime GPU intentionally leaves the live RVC probe incomplete. The manual commands below remain useful when selecting a different CUDA wheel or Python environment.
+
 ```powershell
 py -3.11 -m venv engine-python/.venv
 .\engine-python\.venv\Scripts\python.exe -m pip install --upgrade pip
@@ -64,6 +72,15 @@ py -3.11 -m venv engine-python/.venv
 ```
 
 The Tauri host looks for the project-local interpreter before falling back to other discovery. Keeping this environment local makes runtime probing and reproduction predictable.
+
+Release bundles also carry `engine-python\setup-runtime.ps1`. The desktop
+warning's **Run setup** action launches that script in a visible PowerShell
+window. A source checkout gets an adjacent `.venv`; an installed copy under
+`Program Files` uses `%LOCALAPPDATA%\VC Next\engine-python\.venv` so setup does
+not require write access to the application directory. The Tauri host searches
+that per-user location automatically on the next probe. The CUDA/PyTorch wheels
+are deliberately not hidden inside the installer, so users can see download
+progress and driver errors.
 
 ## Two protocols
 
@@ -165,6 +182,34 @@ or:
 
 This allows models under both w-okada `main/model_dir/<slot>` and neighboring `voice model` folders to share the same engine assets. The import workflow can also provide an explicit ContentVec `.onnx` path.
 
+The loader also accepts common w-okada/RVC asset aliases such as `contentvec.onnx`, `contentvec_f.onnx`, `rmvpe_onnx.onnx`, `rmvpe.onnx`, and `rmvpe_2023.onnx`. If a bundle uses a different filename, select the ContentVec embedder explicitly in the model package dialog; RMVPE is still validated before CUDA warm-up.
+
+### Package metadata compatibility
+
+`model_probe.inspect_model` reads a bounded `params.json` beside the selected
+checkpoint (or one package directory above it). The metadata is treated as
+untrusted configuration, never as model code, and is normalized before it can
+reach the worker:
+
+| w-okada key | Normalized value | Use |
+| --- | --- | --- |
+| `pitch_shift` | −50…+50 | initial pitch shift |
+| `index_ratio` | 0…1 | retrieval blend |
+| `protect_ratio` | 0…0.5 | unvoiced/consonant protection |
+| `chunk_sec` | 480…480,000 frames | live Chunk/hop |
+| `embedder` | non-empty hint | Hubert/ContentVec asset order |
+| sibling `.index` | bounded path | recommended retrieval index |
+
+The result is exposed as `modelDefaults` in inspection JSON. A w-okada
+`hubert_base_l12` hint follows the current upstream resolver and prefers the
+canonical `contentvec/contentvec-f.onnx` asset when both ContentVec and Rinna
+Hubert are present. Explicit paths and settings from the desktop UI remain
+authoritative; an explicit Rinna hint/path still selects Rinna first.
+
+Invalid JSON, values outside the safe ranges, and files larger than the bounded
+metadata limit are ignored. This keeps inspection metadata-only and prevents a
+bad package sidecar from blocking a valid checkpoint.
+
 ## Live model lifecycle
 
 ```mermaid
@@ -184,7 +229,8 @@ sequenceDiagram
     Worker-->>Rust: ready status and effective stream shape
     loop Live audio
         Rust->>Worker: binary f32 hop
-        Worker-->>Rust: binary converted f32 hop
+        Worker->>Worker: silence gate / RMS floor
+        Worker-->>Rust: binary converted or exact-zero f32 hop
     end
     Rust->>Worker: unload or shutdown
 ```
@@ -195,17 +241,33 @@ The generator, feature sessions, reconstructed index vectors, streaming history,
 
 Each analysis pass performs:
 
-1. 48 kHz input resampling to 16 kHz feature rate;
+1. 48 kHz input resampling to the 16 kHz feature rate using w-okada's
+   `resampy` `kaiser_fast` filter (with a matching torchaudio fallback during
+   partial runtime setup);
 2. ContentVec content-feature extraction;
 3. RMVPE F0 and periodicity extraction;
-4. optional FAISS nearest-neighbor retrieval;
+4. optional FAISS retrieval (nearest-neighbor `k=1` by default, with an explicit weighted-neighbor comparison mode);
 5. v1/v2 feature preparation and pitch quantization;
 6. PyTorch generator inference;
 7. generator output resampling from 32/40 kHz to the 48 kHz live rate when required;
 8. stateful SOLA alignment and equal-power overlap;
 9. one converted hop returned to Rust.
 
-Timing for resampling, content, pitch, retrieval, generation, stitching, and total processing is retained in worker status.
+Timing for resampling, content, pitch, retrieval, generation, stitching, and total processing is retained in worker status. The live status also reports the measured input floor/max, the source-volume RMS, and the applied w-okada-compatible output gain.
+
+An idle-input gate runs before those expensive stages. The worker classifies a
+hop as silent when RMS is at most `0.002`, returns an exact zero hop, and
+resets input/SOLA history at the next voiced boundary. The peak value remains
+diagnostic, but isolated interface spikes do not wake the neural decoder.
+The status fields `silenceSuppressedCalls`, `lastInputRms`, `maxInputRms`, `lastInputPeak`,
+`silenceGateRms`, `silenceGatePeak`, and `silenceGateMode` make the Python-side
+decision visible in diagnostics. The current mode combines the RMS floor with
+a concentrated-activity ratio: isolated peak spikes below the measured noise
+floor do not wake the neural decoder, while a short quiet syllable can still
+pass. The native Rust route adds a separate `0.004` RMS whole-block backstop
+for virtual-device floors that sit above the Python hop threshold.
+Warm-up and calibration bypass the gate intentionally; otherwise their timing
+would measure the shortcut rather than the actual inference path.
 
 ## Retrieval index handling
 
@@ -227,11 +289,11 @@ Named defaults are defined at 48 kHz:
 
 | Preset | Chunk/hop | Analysis | Crossfade | SOLA search |
 | --- | ---: | ---: | ---: | ---: |
-| Low latency | 7,680 frames / 160 ms | 19,200 / 400 ms | 30 ms | 10 ms |
-| Balanced | 9,600 / 200 ms | 24,000 / 500 ms | 40 ms | 12 ms |
-| Quality | 12,000 / 250 ms | 28,800 / 600 ms | 50 ms | 15 ms |
+| Low latency | 7,680 frames / 160 ms | 19,200 / 400 ms | 4,096 / 85.3 ms | 480 / 10 ms |
+| Balanced | 9,600 / 200 ms | 24,000 / 500 ms | 4,096 / 85.3 ms | 576 / 12 ms |
+| Quality | 12,000 / 250 ms | 28,800 / 600 ms | 4,096 / 85.3 ms | 720 / 15 ms |
 
-The UI can provide explicit Chunk and Extra/context values. The worker validates them between 480 and 480,000 frames, scales overlap/search when necessary, and increases the analysis context if the requested value is too short for a complete SOLA candidate.
+The UI can provide explicit Chunk and Extra/context values. The worker validates them between 480 and 480,000 frames, scales overlap/search when necessary, reserves the w-okada-compatible 4,096-sample front context, rounds the effective window to a 128-sample boundary, and increases it if the requested value is too short for a complete SOLA candidate.
 
 ## Settings contract
 
@@ -243,7 +305,7 @@ The load/settings contract currently supports:
 | `indexRatio` | 0.0–1.0; requires an index above zero |
 | `protectRatio` | 0.0–0.5 |
 | `speakerId` | within the checkpoint speaker count |
-| `f0Threshold` | 0.01–0.20 |
+| `f0Threshold` | 0.01–0.99 (default 0.30) |
 | `streamingPreset` | `quality`, `balanced`, or `latency` |
 | `chunkFrames` | bounded whole-number frame count |
 | `extraFrames` | bounded whole-number context; stitch-safe minimum enforced |
@@ -289,10 +351,10 @@ Run an offline conversion:
 
 ## Current limitations
 
-- The verified runtime is Windows/NVIDIA with CUDA.
+- The verified runtime is Windows/NVIDIA with CUDA. The runtime probe checks both PyTorch CUDA and the ONNX Runtime CUDA provider because ContentVec and RMVPE are required for every live RVC session.
 - RMVPE is the only connected live F0 extractor.
 - The worker consumes mono 48 kHz live PCM even when the generator targets another output rate.
-- RVC `.onnx` live inference is not connected.
+- Exported five-input RVC `.onnx` generators are supported by the live worker. The loader validates the required `feats`, `p_len`, `pitch`, `pitchf`, and `sid` inputs, while other exported signatures remain unsupported until an adapter is implemented.
 - The project does not redistribute checkpoints, ContentVec, RMVPE, or user indexes.
 - Packaging the full Python/CUDA environment into an installer remains future work.
 

@@ -28,8 +28,8 @@ Output and Monitor are independent Windows playback streams with separate queues
 - Default-device detection
 - Device ID, name, channel count, default rate, and sample-format reporting
 - Explicit input, output, and monitor selection
-- Same-device and sample-rate validation before startup
-- Refresh and device-reconnection workflow while audio is stopped
+- Same-device validation before startup plus bounded input/output/monitor rate conversion around the fixed 48 kHz RVC path
+- Refresh before startup plus running-session endpoint detection and explicit stream restart after reconnection
 
 ### Audio conversion
 
@@ -37,7 +37,11 @@ Output and Monitor are independent Windows playback streams with separate queues
 - Mono downmix for inference
 - Mono-to-device-channel fan-out for playback
 - Validated input, output, and monitor gain
+- Gentle DC/high-pass filtering before feature extraction
+- Callback-safe adaptive stationary-noise suppression
 - Smoothed envelope-based input noise gate
+- Conservative far-end echo control using the converted output reference
+- Output and monitor limiting to the float-audio range
 - Transparent noise-gate off state
 
 ### Real-time isolation
@@ -57,6 +61,10 @@ Output and Monitor are independent Windows playback streams with separate queues
 - Independent correction counters per playback route
 - Audio-callback error retention in status
 - Supervised Python model-worker recovery outside the callbacks
+- Best-effort monitor startup: if Windows rejects the selected monitor
+  endpoint because it is busy or its shared format changed, VC Next keeps the
+  input and converted-output route alive, disables only the monitor stream,
+  and reports the reason through `lastError`.
 
 ## Thread and queue ownership
 
@@ -100,14 +108,15 @@ For each device callback, the input path:
 
 1. converts the device sample format to `f32`;
 2. averages active input channels into mono;
-3. applies input gain;
-4. tracks a smoothed signal envelope;
-5. applies the configured noise gate;
-6. updates the input peak;
-7. pushes samples into the bounded capture queue;
-8. increments overrun counters when the queue is full.
+3. applies input gain and a gentle DC/high-pass filter;
+4. applies conservative far-end echo control when enabled;
+5. applies adaptive stationary-noise suppression;
+6. tracks a smoothed signal envelope and applies the configured noise gate;
+7. updates the input peak;
+8. pushes samples into the bounded capture queue;
+9. increments overrun counters when the queue is full.
 
-The noise gate is intentionally simple and predictable. It is not a replacement for noise suppression, echo cancellation, or dereverberation.
+These processors are intentionally bounded and callback-safe. They reduce common stationary room noise and speaker bleed, but are not a replacement for a full WebRTC AEC3, RNNoise denoiser, or dereverberation system.
 
 ## Inference scheduling
 
@@ -132,8 +141,14 @@ At 48 kHz:
 
 | State | Frames | Approximate buffered time |
 | --- | ---: | ---: |
-| Initial target | 960 | 20 ms |
+| Initial target | 1,920 | 40 ms |
 | Maximum adaptive target | 4,800 | 100 ms |
+
+On startup the host now waits for an eight-chunk cushion (3,840 frames, about
+80 ms) before it starts the output stream. The steady-state controller begins
+at the 40 ms target and grows only when a device actually underruns; this keeps
+the normal path responsive without exposing the first CUDA/RVC warm-up as an
+audible click.
 
 The controller starts at the lower target, raises it after underruns, and gradually settles back after a stable period. This trades a bounded amount of latency for fewer repeated dropouts on devices with scheduling jitter.
 
@@ -158,6 +173,11 @@ This is currently a pragmatic stability mechanism. A continuous resampler may re
 | Output gain | −24 to +12 dB | Applied to the converted/passthrough route |
 | Monitor gain | −24 to +12 dB | Applied only to the optional monitor route |
 | Noise gate | Off / −79 to −20 dB | Smoothed envelope gate on input |
+| Noise suppression | 0–100% | Adaptive downward expander for stationary noise |
+| Echo control | 0–100% | Conservative NLMS cancellation from converted-output reference |
+| High-pass / DC filter | Off / On | Optional gentle ~30 Hz one-pole filter; off by default for w-okada parity |
+
+The default route is fidelity-first: high-pass, suppression, echo control, and the user noise gate are off until enabled. This avoids changing the timbre or consonant tails of a clean microphone signal while the compatibility path is being compared with w-okada.
 
 Device selection and these settings are locked while a live session is running. Stop audio before changing the route or stream shape.
 
@@ -172,9 +192,9 @@ Device selection and these settings are locked while a live session is running. 
 | Totals | captured, processed, played, and monitor-played frames |
 | Errors | input/output/monitor overruns and underruns, last callback error |
 | Stability | prime targets, reprimes, drift drops, and repeated frames |
-| Inference | backend, Chunk, calls, timing, missed deadlines, dropped frames |
+| Inference | backend, Chunk, calls, timing, missed deadlines, dropped frames, and native silence-block suppression |
 | Signal | input, output, and monitor peaks |
-| Processing | input/output/monitor gain and gate threshold |
+| Processing | input/output/monitor gain, gate, suppression, and echo strength |
 
 These values diagnose the stage that is failing. A high Python model time is different from a playback underrun, capture overrun, or monitor clock drift.
 
@@ -217,14 +237,93 @@ Run it with:
 cargo test --manifest-path src-tauri\Cargo.toml
 ```
 
+The repository also includes a native-route diagnostic that drives the same
+CPAL/WASAPI streams and persistent RVC worker used by the desktop host. It is
+useful for separating a real audio-engine problem from a UI or browser-preview
+problem:
+
+```powershell
+# Enumerate the exact Windows endpoint IDs and names first.
+npm run validate:native-route -- -List
+
+# Run a short idle route with a real checkpoint and its matching index.
+npm run validate:native-route -- `
+  -ModelPath "C:\path\to\voice.pth" `
+  -IndexPath "C:\path\to\voice.index" `
+  -ContentVecPath "C:\path\to\contentvec-f.onnx" `
+  -InputDevice "Voicemeeter Out A2" `
+  -OutputDevice "CABLE-B Input" `
+  -Seconds 5 -ReportPath outputs\native-route.json
+```
+
+The diagnostic follows the fidelity-first default used by the app. To compare
+the optional rumble/DC cleanup path, add `-HighPass`; the JSON report records
+the request as `highPassRequested` and the active route as `audioStatus.highPassEnabled`.
+
+The report includes the selected model defaults, live-worker telemetry,
+capture/output/monitor peaks, queue counts, missed inference deadlines,
+underruns, bounded clock corrections, and the native
+`inferenceSilenceSuppressedCalls` counter. For an empty input, a healthy route
+should report an output peak of `0` and an increasing Python or native silence
+counter, depending on which layer sees the device floor first. A speech fixture
+should produce a non-zero output peak and should not be classified as silence.
+
+The RTX 4050 reference checkpoint was exercised through the native route with
+the package settings `Pitch +14`, `Index 0.30`, `Protect 0.50`, `Chunk 24,000`,
+and `Extra 28,800`. A five-second idle run completed with zero input/output
+peaks, no queue drops, no underruns, and no missed inference deadlines. This
+proves the native idle/noise path; it is not a blind perceptual quality match
+against w-okada. That comparison still requires recordings made from the same
+input, endpoint, model, index, pitch extractor, and chunk settings.
+
+After increasing the initial playback cushion, a 15-second idle run on the
+reference Realtek USB microphone with Output and Headphone Monitor attached
+reported `maxInputPeak: 0.00239`, `maxOutputPeak: 0`, `maxMonitorPeak: 0`, 30
+native silence blocks, and zero output/monitor underruns or deadline misses.
+
+The repeatable speech-loopback harness now exercises the same path with a
+known FLAC fixture sent through a WASAPI virtual-cable endpoint:
+
+```powershell
+npm run validate:native-speech -- `
+  -ModelPath "C:\path\to\voice.pth" `
+  -IndexPath "C:\path\to\voice.index" `
+  -ContentVecPath "C:\path\to\contentvec-f.onnx" `
+  -FixturePath "C:\path\to\speech.flac" `
+  -InputDevice "CABLE-A Output (VB-Audio Cable A)" `
+  -FixtureOutputDevice "CABLE-A Input (VB-Audio Cable A)" `
+  -OutputDevice "CABLE-B Input (VB-Audio Cable B)" `
+  -Seconds 12 -Preset balanced `
+  -ReportPath outputs\native-speech-loopback.json
+```
+
+The fixture helper resolves duplicate Windows endpoint names to the WASAPI
+instance instead of failing on the MME/DirectSound/WASAPI name collision. The
+RTX 4050 `e-girl_e350_s42700.pth` plus its matching 62,851-vector index has
+passed the persistent-worker soak with CUDA execution, a healthy worker, and
+zero missed deadlines. The native route's idle and monitor-fallback checks also
+complete without output underruns or inference deadline misses. The current
+machine's CABLE-A playback/capture pairing did not deliver the fixture to the
+capture endpoint, however, so this harness is intentionally still marked
+pending for converted-speech acceptance; a non-zero worker or fixture result
+must not be mistaken for end-to-end device loopback proof.
+
+After the w-okada parity pass, the real-model Balanced worker reports
+`f0Threshold: 0.30`, `silenceFrontFrames: 9,728`, and
+`generatorConvertFrames: 14,274`; the larger front value is the effective
+context derived from the selected 24,000-frame analysis window, so RMVPE and
+generator tail alignment follow the actual Chunk/Extra choice. Final
+converted-speech certification still requires a working physical or virtual
+input loopback and a blind recording comparison against w-okada.
+
 ## Known limitations
 
-- Input, Output, and Monitor must currently report the same default sample rate.
+- Linear rate conversion is intentionally conservative; long-session quality testing should compare it with a higher-order asynchronous resampler.
 - Shared-mode device defaults are used instead of an exclusive/event-driven Windows tuning pass.
 - Sample-slip correction is not a high-quality continuous resampler.
 - Bypass is represented by explicit passthrough when no model is loaded rather than a seamless in-session dry/converted crossfade.
-- Hot-plug recovery requires stopping and refreshing devices.
-- No acoustic echo cancellation, denoiser, dereverberation, EQ, compressor, or limiter is connected yet.
+- Device hot-plug detection is implemented, but the user must reconnect the endpoint and press **Restart audio**; automatic repeated restarts are intentionally avoided.
+- The connected noise and echo processors are lightweight real-time controls, not full acoustic echo cancellation, RNNoise, dereverberation, EQ, or compressor stages.
 
 ## Next measurement pass
 
@@ -232,7 +331,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 2. Run two-hour passthrough and converted-audio soak tests while recording all queue and correction counters.
 3. Add an impulse/loopback harness for P50/P95 end-to-end latency.
 4. Compare bounded sample-slip correction with a controlled asynchronous resampler.
-5. Test device disconnect/reconnect recovery during an active session.
+5. Certify device disconnect/reconnect recovery during an active session across physical and virtual endpoints.
 6. Tune smaller RVC hops only after callback and inference headroom are measured together.
 
 ## Related documents

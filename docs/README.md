@@ -14,6 +14,7 @@ flowchart TD
     Architecture --> Sidecar["Python sidecar"]
     Sidecar --> Offline["Offline RVC proof"]
     Sidecar --> Live["Persistent live RVC"]
+    Live --> Parity["w-okada parity audit"]
     Architecture --> Targets["Targets and roadmap"]
     Architecture --> Upstream["Upstream assessment"]
 ```
@@ -25,9 +26,16 @@ flowchart TD
 | [Native audio spike](native-audio-spike.md) | WASAPI/CPAL routing, queues, monitoring, adaptive playback, clock correction, and audio telemetry |
 | [Offline RVC spike](offline-rvc-spike.md) | How the first end-to-end model compatibility proof was produced and measured |
 | [Persistent live RVC spike](live-rvc-spike.md) | Resident model lifecycle, stream geometry, FAISS retrieval, SOLA, deadlines, and restart behavior |
+| [w-okada parity audit](wokada-parity.md) | Processing-boundary comparisons, RMVPE defaults, and reproducible quality checks |
 | [Prototype targets](prototype-targets.md) | What is complete, what remains experimental, and how future milestones will be accepted |
 | [Upstream assessment](upstream-assessment.md) | Which w-okada concepts or files are reusable, replaced, or excluded |
 | [RVC provenance](../engine-python/vc_next_sidecar/rvc_compat/PROVENANCE.md) | Exact imported paths, upstream commit, notices, and local modifications |
+
+The root README contains the complete command reference, including the
+optional `npm run validate:route` duplex converted-route harness. That harness
+exercises a real microphone and output device through the persistent RVC
+worker, while the native Rust/CPAL application path remains the final product
+acceptance target.
 
 ## Status vocabulary
 
