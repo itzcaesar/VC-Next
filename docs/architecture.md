@@ -232,6 +232,7 @@ During recovery, the native pipeline remains alive and safely emits silence wher
 | `get_system_profile` | Reports the Windows/GPU reference profile | Diagnostic only |
 | `get_audio_devices` | Enumerates active input and output endpoints | Runs off the UI thread |
 | `start_audio_engine` | Starts capture, inference, output, and optional monitor | Native boundary resamples endpoint rates to the fixed 48 kHz live path |
+| `test_audio_routes` | Plays a bounded 440 Hz tone on output and optional monitor | Runs only while audio is stopped; reports callback frames, peak, and per-route errors without invoking RVC |
 | `get_audio_engine_status` | Returns peaks, queue depth, xruns, timings, and corrections | Snapshot; does not block callbacks |
 | `stop_audio_engine` | Deterministically drops the native streams | Safe to call repeatedly |
 | `probe_inference_runtime` | Checks Python, packages, Torch, and CUDA | Runs in the project-local environment |

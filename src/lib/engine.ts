@@ -84,6 +84,18 @@ export interface AudioEngineStatus {
   lastError: string | null;
 }
 
+export interface AudioRouteTestResult {
+  outputDeviceName: string;
+  monitorDeviceName: string | null;
+  durationMs: number;
+  outputFrames: number;
+  monitorFrames: number;
+  outputPeak: number;
+  monitorPeak: number;
+  outputError: string | null;
+  monitorError: string | null;
+}
+
 export interface AudioProcessingSettings {
   inputGainDb: number;
   outputGainDb: number;
@@ -504,6 +516,31 @@ export async function restartAudioEngine(): Promise<AudioEngineStatus> {
 export async function getAudioEngineStatus(): Promise<AudioEngineStatus> {
   if (!isTauriRuntime()) return STOPPED_ENGINE_STATUS;
   return invoke<AudioEngineStatus>("get_audio_engine_status");
+}
+
+export async function testAudioRoutes(
+  outputDeviceId: string,
+  monitorDeviceId: string | null,
+  durationMs = 800,
+): Promise<AudioRouteTestResult> {
+  if (!isTauriRuntime()) {
+    return {
+      outputDeviceName: "Browser preview output",
+      monitorDeviceName: monitorDeviceId ? "Browser preview monitor" : null,
+      durationMs,
+      outputFrames: Math.round(durationMs * 48),
+      monitorFrames: monitorDeviceId ? Math.round(durationMs * 48) : 0,
+      outputPeak: 0.08,
+      monitorPeak: monitorDeviceId ? 0.08 : 0,
+      outputError: null,
+      monitorError: null,
+    };
+  }
+  return invoke<AudioRouteTestResult>("test_audio_routes", {
+    outputDeviceId,
+    monitorDeviceId,
+    durationMs,
+  });
 }
 
 export async function probeInferenceRuntime(): Promise<InferenceRuntimeProbe> {

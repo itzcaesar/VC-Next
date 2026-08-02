@@ -472,6 +472,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .checklist-step small { margin-top: 4px; color: var(--muted); font-size: 9px; line-height: 1.35; }
 
 .setup-heading { min-height: 78px; margin: 0; padding: 18px 18px 14px; border-bottom: 1px solid var(--stroke); }
+.setup-heading-actions { display: flex; align-items: center; gap: 10px; }
 .panel-subtitle { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
 .setup-section { padding: 18px 18px; border-bottom: 1px solid var(--stroke); }
 .device-field { display: block; margin-bottom: 6px; }
@@ -497,6 +498,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .info-callout > .callout-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 3px; }
 .info-callout strong { font-weight: 620; }
 .info-callout.warning { color: var(--warning); background: var(--warning-soft); }
+.info-callout.success { color: var(--success); background: var(--success-soft); }
 .info-callout + .info-callout { margin-top: 8px; }
 .info-callout.error { margin-top: 8px; color: var(--danger); background: var(--danger-soft); }
 .section-heading.compact { align-items: center; margin-bottom: 10px; }

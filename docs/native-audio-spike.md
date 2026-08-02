@@ -214,6 +214,13 @@ instead of appearing to hang. The production native engine remains on CPAL /
 WASAPI and reports a stalled route in the desktop UI when input is active but
 the output peak stays idle.
 
+The Audio setup panel also includes a bounded **Test routes** action. It plays a
+quiet 440 Hz tone directly through the selected output and optional Monitor
+endpoint, then reports callback frame counts, peak level, and any per-endpoint
+Windows error. This verifies that a selected device can actually accept audio
+without loading a model or depending on a cable loopback. The diagnostic CLI
+exposes the same check with `native-route-validation --test-tone`.
+
 A common voice-chat route is:
 
 ```text

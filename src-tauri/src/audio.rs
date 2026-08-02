@@ -115,6 +115,20 @@ pub struct AudioEngineStatus {
     last_error: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioRouteTestResult {
+    output_device_name: String,
+    monitor_device_name: Option<String>,
+    duration_ms: u32,
+    output_frames: u64,
+    monitor_frames: u64,
+    output_peak: f32,
+    monitor_peak: f32,
+    output_error: Option<String>,
+    monitor_error: Option<String>,
+}
+
 #[derive(Clone, Copy)]
 pub struct AudioProcessingSettings {
     input_gain_db: f32,
@@ -631,6 +645,119 @@ impl AudioEngine {
     }
 }
 
+/// Play a short, bounded tone on the selected output and optional monitor
+/// routes. This deliberately bypasses the inference engine: it is a setup
+/// diagnostic for Windows endpoints, not a production audio path.
+pub fn test_output_routes(
+    output_id: &str,
+    monitor_id: Option<&str>,
+    duration_ms: u32,
+) -> Result<AudioRouteTestResult, String> {
+    if !(100..=5_000).contains(&duration_ms) {
+        return Err("Route test duration must be between 100 and 5,000 ms.".to_owned());
+    }
+    let monitor_id = monitor_id.filter(|id| !id.trim().is_empty());
+    if monitor_id == Some(output_id) {
+        return Err(
+            "Monitor must use a different device from the main output. Choose headphones or turn monitoring off."
+                .to_owned(),
+        );
+    }
+
+    let host = cpal::default_host();
+    let (output_device, output_name) = find_device(&host, DeviceDirection::Output, output_id)?;
+    let output_supported = output_device
+        .default_output_config()
+        .map_err(|error| format!("Could not read the output format: {error}"))?;
+    let output_state = Arc::new(ToneTelemetry::new(
+        duration_ms,
+        output_supported.sample_rate(),
+    ));
+    let output_stream = build_tone_stream(
+        &output_device,
+        output_supported.sample_format(),
+        &output_supported.clone().into(),
+        Arc::clone(&output_state),
+    )?;
+
+    let mut monitor_name = None;
+    let mut monitor_state = None;
+    let mut monitor_stream = None;
+    let mut monitor_error = None;
+    if let Some(id) = monitor_id {
+        match find_device(&host, DeviceDirection::Output, id) {
+            Ok((device, name)) => match device.default_output_config() {
+                Ok(supported) => {
+                    monitor_name = Some(name);
+                    let state = Arc::new(ToneTelemetry::new(duration_ms, supported.sample_rate()));
+                    match build_tone_stream(
+                        &device,
+                        supported.sample_format(),
+                        &supported.clone().into(),
+                        Arc::clone(&state),
+                    ) {
+                        Ok(stream) => {
+                            monitor_state = Some(state);
+                            monitor_stream = Some(stream);
+                        }
+                        Err(error) => monitor_error = Some(error),
+                    }
+                }
+                Err(error) => {
+                    monitor_error = Some(format!("Could not read the monitor format: {error}"));
+                }
+            },
+            Err(error) => monitor_error = Some(error),
+        }
+    }
+
+    output_stream
+        .play()
+        .map_err(|error| format!("Could not start the output route test: {error}"))?;
+    if let Some(stream) = monitor_stream.as_ref() {
+        if let Err(error) = stream.play() {
+            monitor_error = Some(format!("Could not start the monitor route test: {error}"));
+            monitor_stream = None;
+        }
+    }
+
+    thread::sleep(Duration::from_millis(duration_ms as u64 + 50));
+    drop(monitor_stream);
+    drop(output_stream);
+
+    let output_frames = output_state.frames.load(Ordering::Relaxed);
+    let output_error = output_state.last_error().or_else(|| {
+        (output_frames == 0).then(|| "The output callback did not deliver any frames.".to_owned())
+    });
+    let monitor_frames = monitor_state
+        .as_ref()
+        .map(|state| state.frames.load(Ordering::Relaxed))
+        .unwrap_or(0);
+    let monitor_error = monitor_error.or_else(|| {
+        monitor_state.as_ref().and_then(|state| {
+            state.last_error().or_else(|| {
+                (monitor_frames == 0)
+                    .then(|| "The monitor callback did not deliver any frames.".to_owned())
+            })
+        })
+    });
+
+    Ok(AudioRouteTestResult {
+        output_device_name: output_name,
+        monitor_device_name: monitor_name,
+        duration_ms,
+        output_frames,
+        monitor_frames,
+        output_peak: f32::from_bits(output_state.peak_bits.load(Ordering::Relaxed)),
+        monitor_peak: monitor_state
+            .as_ref()
+            .map(|state| f32::from_bits(state.peak_bits.load(Ordering::Relaxed)))
+            .unwrap_or(0.0),
+        output_error,
+        monitor_error,
+    })
+}
+
 fn wait_for_startup_prime(playback_ring: &ArrayQueue<f32>) {
     let deadline = Instant::now() + STARTUP_PRIME_TIMEOUT;
     while playback_ring.len() < STARTUP_PRIME_FRAMES && Instant::now() < deadline {
@@ -1011,6 +1138,119 @@ fn build_output_stream(
             "Output sample format {unsupported} is not supported by the native audio engine."
         )),
     }
+}
+
+struct ToneTelemetry {
+    duration_frames: u64,
+    frames: AtomicU64,
+    peak_bits: AtomicU32,
+    last_error: Mutex<Option<String>>,
+}
+
+impl ToneTelemetry {
+    fn new(duration_ms: u32, sample_rate: u32) -> Self {
+        Self {
+            duration_frames: (u64::from(duration_ms) * u64::from(sample_rate)) / 1_000,
+            frames: AtomicU64::new(0),
+            peak_bits: AtomicU32::new(0),
+            last_error: Mutex::new(None),
+        }
+    }
+
+    fn record_error(&self, error: String) {
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(error);
+        }
+    }
+
+    fn last_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|error| error.clone())
+    }
+
+    fn record_peak(&self, peak: f32) {
+        let mut current = self.peak_bits.load(Ordering::Relaxed);
+        loop {
+            let current_peak = f32::from_bits(current);
+            if peak <= current_peak {
+                break;
+            }
+            match self.peak_bits.compare_exchange_weak(
+                current,
+                peak.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
+        }
+    }
+}
+
+fn build_tone_stream(
+    device: &Device,
+    format: SampleFormat,
+    config: &StreamConfig,
+    telemetry: Arc<ToneTelemetry>,
+) -> Result<Stream, String> {
+    match format {
+        SampleFormat::F32 => {
+            build_tone_stream_typed::<f32>(device, config, telemetry, |sample| sample)
+        }
+        SampleFormat::I16 => build_tone_stream_typed::<i16>(device, config, telemetry, |sample| {
+            (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+        }),
+        SampleFormat::U16 => build_tone_stream_typed::<u16>(device, config, telemetry, |sample| {
+            ((sample.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16
+        }),
+        unsupported => Err(format!(
+            "Output sample format {unsupported} is not supported by the route test."
+        )),
+    }
+}
+
+fn build_tone_stream_typed<T>(
+    device: &Device,
+    config: &StreamConfig,
+    telemetry: Arc<ToneTelemetry>,
+    convert: fn(f32) -> T,
+) -> Result<Stream, String>
+where
+    T: cpal::SizedSample + Copy + Send + 'static,
+{
+    let channels = config.channels as usize;
+    let sample_rate = config.sample_rate.max(1) as f32;
+    let fade_frames = (config.sample_rate / 100).max(1) as u64;
+    let error_telemetry = Arc::clone(&telemetry);
+    device
+        .build_output_stream(
+            *config,
+            move |data: &mut [T], _| {
+                let mut block_peak = 0.0_f32;
+                for frame in data.chunks_exact_mut(channels) {
+                    let frame_index = telemetry.frames.fetch_add(1, Ordering::Relaxed);
+                    let position = frame_index as f32 / sample_rate;
+                    let mut envelope = 1.0_f32;
+                    if frame_index < fade_frames {
+                        envelope = frame_index as f32 / fade_frames as f32;
+                    } else if frame_index + fade_frames > telemetry.duration_frames {
+                        envelope = telemetry.duration_frames.saturating_sub(frame_index) as f32
+                            / fade_frames as f32;
+                    }
+                    let sample = (0.08
+                        * envelope.clamp(0.0, 1.0)
+                        * (std::f32::consts::TAU * 440.0 * position).sin())
+                    .clamp(-1.0, 1.0);
+                    block_peak = block_peak.max(sample.abs());
+                    let converted = convert(sample);
+                    frame.fill(converted);
+                }
+                telemetry.record_peak(block_peak);
+            },
+            move |error| error_telemetry.record_error(format!("Output route test error: {error}")),
+            None,
+        )
+        .map_err(|error| format!("Could not create the route test stream: {error}"))
 }
 
 fn build_output_stream_typed<T>(

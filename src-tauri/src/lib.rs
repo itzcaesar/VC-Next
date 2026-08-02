@@ -10,7 +10,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use audio::{AudioDeviceSnapshot, AudioEngine, AudioEngineStatus, AudioProcessingSettings};
+use audio::{
+    AudioDeviceSnapshot, AudioEngine, AudioEngineStatus, AudioProcessingSettings,
+    AudioRouteTestResult,
+};
 use live_sidecar::LiveRvcService;
 use serde::Serialize;
 
@@ -232,6 +235,27 @@ async fn get_audio_engine_status(
             .lock()
             .map_err(|_| "The audio engine lock is unavailable.".to_owned())?
             .status())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn test_audio_routes(
+    output_device_id: String,
+    monitor_device_id: Option<String>,
+    duration_ms: u32,
+    engine: tauri::State<'_, SharedAudioEngine>,
+) -> Result<AudioRouteTestResult, String> {
+    let engine = Arc::clone(engine.inner());
+    run_blocking("Audio route test", move || {
+        if engine
+            .lock()
+            .map_err(|_| "The audio engine lock is unavailable.".to_owned())?
+            .is_running()
+        {
+            return Err("Stop audio before testing an output route.".to_owned());
+        }
+        audio::test_output_routes(&output_device_id, monitor_device_id.as_deref(), duration_ms)
     })
     .await
 }
@@ -487,6 +511,7 @@ pub fn run() {
             restart_audio_engine,
             stop_audio_engine,
             get_audio_engine_status,
+            test_audio_routes,
             probe_inference_runtime,
             open_runtime_setup,
             inspect_rvc_model,

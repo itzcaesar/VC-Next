@@ -23,9 +23,11 @@ import {
   startAudioEngine,
   restartAudioEngine,
   stopAudioEngine,
+  testAudioRoutes,
   type AudioDevice,
   type AudioDeviceSnapshot,
   type AudioEngineStatus,
+  type AudioRouteTestResult,
   type AudioProcessingSettings,
   type ConversionMode,
   type InferenceRuntimeProbe,
@@ -585,6 +587,8 @@ function App() {
   const [modelUnloadBusy, setModelUnloadBusy] = useState(false);
   const [modelUnloadConfirmOpen, setModelUnloadConfirmOpen] = useState(false);
   const [deviceRefreshBusy, setDeviceRefreshBusy] = useState(false);
+  const [routeTestBusy, setRouteTestBusy] = useState(false);
+  const [routeTestResult, setRouteTestResult] = useState<AudioRouteTestResult | null>(null);
   const [runtimeRefreshBusy, setRuntimeRefreshBusy] = useState(false);
   const [startupBusy, setStartupBusy] = useState(true);
   const [modelQuery, setModelQuery] = useState("");
@@ -1296,6 +1300,32 @@ function App() {
     }
   }
 
+  async function runRouteTest() {
+    if (routeTestBusy || running || !outputDeviceId) return;
+    setRouteTestBusy(true);
+    setEngineError(null);
+    try {
+      const result = await testAudioRoutes(outputDeviceId, monitorDeviceId || null);
+      setRouteTestResult(result);
+      if (result.outputError) {
+        setEngineError(`Output route test failed: ${result.outputError}`);
+        appendLiveLog(`Output route test failed · ${result.outputError}`, "error");
+      } else if (result.monitorError) {
+        setNotice("Output route passed; monitor route needs attention");
+        appendLiveLog(`Output route passed · monitor warning: ${result.monitorError}`, "warning");
+      } else {
+        setNotice("Output and monitor routes passed the test tone");
+        appendLiveLog("Output and monitor routes passed the test tone", "success");
+      }
+    } catch (error) {
+      setRouteTestResult(null);
+      setEngineError(String(error));
+      appendLiveLog(`Audio route test failed · ${String(error)}`, "error");
+    } finally {
+      setRouteTestBusy(false);
+    }
+  }
+
   async function refreshRuntime() {
     if (runtimeRefreshBusy || running || startupBusy) return;
     setRuntimeRefreshBusy(true);
@@ -1583,6 +1613,7 @@ function App() {
         settings: selectedSettings,
       },
       audioProcessing: audioSettings,
+      routeTest: routeTestResult,
       engine: engineStatus,
       liveRvc: {
         ...liveRvcStatus,
@@ -2267,7 +2298,10 @@ function App() {
         <aside className="setup-panel">
           <div className="panel-heading setup-heading">
             <div><span className="eyebrow">Session</span><h2>Audio setup</h2><p className="panel-subtitle">Route your local audio safely</p></div>
-            <button className="details-toggle refresh-button" onClick={refreshDevices} disabled={running || deviceRefreshBusy}>{deviceRefreshBusy ? "Checking…" : "Refresh"}</button>
+            <div className="setup-heading-actions">
+              <button className="details-toggle refresh-button" onClick={runRouteTest} disabled={running || routeTestBusy || !outputDeviceId}>{routeTestBusy ? "Testing…" : "Test routes"}</button>
+              <button className="details-toggle refresh-button" onClick={refreshDevices} disabled={running || deviceRefreshBusy}>{deviceRefreshBusy ? "Checking…" : "Refresh"}</button>
+            </div>
           </div>
 
           <section className="setup-section">
@@ -2281,7 +2315,7 @@ function App() {
 
             <label className="device-field">
               <span className="field-label"><span className="device-glyph"><Icon name="speaker" /></span><span><strong>Output</strong><small>{deviceSummary(outputDevice)}</small></span></span>
-              <select value={outputDeviceId} onChange={(event) => { const next = event.target.value; setOutputDeviceId(next); if (monitorDeviceId === next) setMonitorDeviceId(""); }} disabled={running}>
+              <select value={outputDeviceId} onChange={(event) => { const next = event.target.value; setOutputDeviceId(next); setRouteTestResult(null); if (monitorDeviceId === next) setMonitorDeviceId(""); }} disabled={running}>
                 {devices.outputs.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}
               </select>
             </label>
@@ -2289,12 +2323,17 @@ function App() {
 
             <label className="device-field">
               <span className="field-label"><span className="device-glyph"><Icon name="headset" /></span><span><strong>Monitor</strong><small>{monitorDevice ? `${deviceSummary(monitorDevice)} · headphones` : "Optional headphone monitor · off"}</small></span></span>
-              <select aria-label="Monitor" value={monitorDeviceId} onChange={(event) => setMonitorDeviceId(event.target.value)} disabled={running}>
+              <select aria-label="Monitor" value={monitorDeviceId} onChange={(event) => { setMonitorDeviceId(event.target.value); setRouteTestResult(null); }} disabled={running}>
                 <option value="">Off</option>
                 {devices.outputs.filter((device) => device.id !== outputDeviceId).map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}
               </select>
             </label>
             <LevelMeter active={hasMonitorSignal} output peak={engineStatus.monitorPeak} />
+
+            {routeTestResult && <div className={`info-callout ${routeTestResult.outputError ? "error" : routeTestResult.monitorError ? "warning" : "success"}`} role="status">
+              <span>{routeTestResult.outputError ? "!" : routeTestResult.monitorError ? "!" : "✓"}</span>
+              <p><strong>{routeTestResult.outputError ? "Output route needs attention." : routeTestResult.monitorError ? "Output passed; monitor needs attention." : "Audio routes passed."}</strong> {routeTestResult.outputError ?? routeTestResult.monitorError ?? `${routeTestResult.outputDeviceName}${routeTestResult.monitorDeviceName ? ` + ${routeTestResult.monitorDeviceName}` : ""} · ${routeTestResult.durationMs} ms test tone`}</p>
+            </div>}
 
             <div className="audio-processing-toggle">
               <div><strong>Audio processing</strong><small>{audioProcessingSummary}</small></div>

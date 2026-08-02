@@ -16,14 +16,15 @@ mod sidecar;
 use std::{env, fs, thread, time::Duration};
 
 use audio::{
-    enumerate_devices, AudioDeviceSnapshot, AudioEngine, AudioEngineStatus, AudioProcessingSettings,
+    enumerate_devices, test_output_routes, AudioDeviceSnapshot, AudioEngine, AudioEngineStatus,
+    AudioProcessingSettings,
 };
 use live_sidecar::LiveRvcService;
 use serde_json::{json, Value};
 
 fn usage() {
     eprintln!(
-        "Usage:\n  native-route-validation --list\n  native-route-validation --model <pth|onnx> --input <device id or name> --output <device id or name> [--monitor <id/name>] [--index <index>] [--contentvec <onnx>] [--seconds N] [--pitch N] [--index-ratio N] [--protect N] [--chunk N] [--extra N] [--preset quality|balanced|latency] [--high-pass] [--report <json path>]"
+        "Usage:\n  native-route-validation --list\n  native-route-validation --test-tone --output <device id or name> [--monitor <id/name>] [--milliseconds N]\n  native-route-validation --model <pth|onnx> --input <device id or name> --output <device id or name> [--monitor <id/name>] [--index <index>] [--contentvec <onnx>] [--seconds N] [--pitch N] [--index-ratio N] [--protect N] [--chunk N] [--extra N] [--preset quality|balanced|latency] [--high-pass] [--report <json path>]"
     );
 }
 
@@ -119,6 +120,23 @@ fn run(args: &[String]) -> Result<(), String> {
     let snapshot = enumerate_devices()?;
     if has_flag(args, "--list") {
         return print_devices(&snapshot);
+    }
+    if has_flag(args, "--test-tone") {
+        let output_selector =
+            option(args, "--output").ok_or_else(|| "--output is required.".to_owned())?;
+        let output_id = resolve_device(&snapshot, "outputs", &output_selector)?;
+        let monitor_id = option(args, "--monitor")
+            .as_deref()
+            .map(|selector| resolve_device(&snapshot, "outputs", selector))
+            .transpose()?;
+        let milliseconds: u32 = parse(args, "--milliseconds", 800_u32)?;
+        let result = test_output_routes(&output_id, monitor_id.as_deref(), milliseconds)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result)
+                .map_err(|error| format!("Could not encode route test report: {error}"))?
+        );
+        return Ok(());
     }
     let model = option(args, "--model").ok_or_else(|| "--model is required.".to_owned())?;
     let input_selector =
