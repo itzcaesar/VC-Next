@@ -3,3 +3,5 @@
 numpy==1.26.4
 soundfile==0.12.1
 faiss-cpu==1.14.3
+# Match w-okada RVCv2's 48 kHz <-> 16 kHz `kaiser_fast` boundary filter.
+resampy==0.4.3

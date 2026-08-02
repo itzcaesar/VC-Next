@@ -8,6 +8,11 @@ import numpy as np
 
 
 MAX_RECONSTRUCTED_INDEX_BYTES = 2 * 1024 * 1024 * 1024
+# The current w-okada RVC pipeline uses the closest FAISS vector (k=1) for
+# its normal retrieval path.  Keep that as the compatibility default; callers
+# can still request the older weighted-neighbor behavior explicitly when they
+# are comparing a different RVC build.
+DEFAULT_RETRIEVAL_NEIGHBORS = 1
 
 
 def validate_index_ratio(value: float) -> float:
@@ -106,7 +111,13 @@ class FaissFeatureIndex:
             index_type=type(index).__name__,
         )
 
-    def blend(self, features: np.ndarray, ratio: float) -> np.ndarray:
+    def blend(
+        self,
+        features: np.ndarray,
+        ratio: float,
+        *,
+        neighbor_count: int = DEFAULT_RETRIEVAL_NEIGHBORS,
+    ) -> np.ndarray:
         index_ratio = validate_index_ratio(ratio)
         source = np.asarray(features, dtype=np.float32)
         if source.ndim != 3 or source.shape[0] != 1:
@@ -118,20 +129,34 @@ class FaissFeatureIndex:
         if index_ratio == 0.0:
             return source
 
+        if not isinstance(neighbor_count, (int, np.integer)) or neighbor_count < 1:
+            raise ValueError("FAISS neighbor_count must be a positive integer.")
+
         query = np.ascontiguousarray(source[0])
-        neighbor_count = min(8, self.vector_count)
-        distances, neighbors = self.index.search(query, neighbor_count)
+        k = min(int(neighbor_count), self.vector_count)
+        distances, neighbors = self.index.search(query, k)
         if neighbors.shape != distances.shape:
             raise ValueError("FAISS returned invalid neighbor identifiers.")
         valid_neighbors = neighbors >= 0
+        if np.any(np.sum(valid_neighbors, axis=1) < 1):
+            raise ValueError("FAISS returned no usable neighbors for a content frame.")
+        if np.any(np.isfinite(distances) & (distances < 0)):
+            raise ValueError("FAISS returned invalid neighbor distances.")
         distances = np.where(valid_neighbors, distances, np.inf)
-        weights = inverse_distance_weights(distances)
         safe_neighbors = np.where(valid_neighbors, neighbors, 0)
-        retrieved = np.sum(
-            self.vectors[safe_neighbors] * weights[:, :, None],
-            axis=1,
-            dtype=np.float32,
-        )
+        if k == 1:
+            # This is intentionally the fast path used by w-okada's current
+            # Pipeline.py.  Avoid an unnecessary weighting pass and preserve
+            # exact nearest-vector semantics for the common compatibility
+            # route.
+            retrieved = self.vectors[safe_neighbors[:, 0]]
+        else:
+            weights = inverse_distance_weights(distances)
+            retrieved = np.sum(
+                self.vectors[safe_neighbors] * weights[:, :, None],
+                axis=1,
+                dtype=np.float32,
+            )
         mixed = source[0] * np.float32(1.0 - index_ratio)
         mixed += retrieved * np.float32(index_ratio)
         if not np.isfinite(mixed).all():

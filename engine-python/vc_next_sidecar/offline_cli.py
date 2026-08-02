@@ -18,6 +18,7 @@ def main() -> int:
     parser.add_argument("--pitch-shift", type=float, default=0.0)
     parser.add_argument("--index-ratio", type=float, default=0.0)
     parser.add_argument("--protect-ratio", type=float, default=0.5)
+    parser.add_argument("--f0-threshold", type=float, default=0.30)
     parser.add_argument("--max-seconds", type=float)
     args = parser.parse_args()
 
@@ -32,6 +33,7 @@ def main() -> int:
         pitch_shift=args.pitch_shift,
         index_ratio=args.index_ratio,
         protect_ratio=args.protect_ratio,
+        f0_threshold=args.f0_threshold,
         max_seconds=args.max_seconds,
     )
     print(json.dumps(result.to_dict(), indent=2))
