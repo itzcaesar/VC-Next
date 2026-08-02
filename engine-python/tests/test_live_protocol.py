@@ -69,6 +69,115 @@ class AssetDiscoveryTests(unittest.TestCase):
         self.assertEqual(actual_contentvec, str(contentvec.resolve()))
         self.assertEqual(actual_rmvpe, str(rmvpe.resolve()))
 
+    def test_common_alternate_rmvpe_name_is_discovered(self) -> None:
+        from vc_next_sidecar.live_worker import discover_feature_models
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "Voice Changer" / "model" / "voice.pth"
+            contentvec = root / "Voice Changer" / "main" / "modules" / "contentvec" / "contentvec.onnx"
+            rmvpe = root / "Voice Changer" / "main" / "modules" / "rmvpe" / "rmvpe_onnx.onnx"
+            model.parent.mkdir(parents=True)
+            contentvec.parent.mkdir(parents=True)
+            rmvpe.parent.mkdir(parents=True)
+            model.write_bytes(b"model")
+            contentvec.write_bytes(b"content")
+            rmvpe.write_bytes(b"pitch")
+
+            actual_contentvec, actual_rmvpe = discover_feature_models(str(model))
+
+        self.assertEqual(actual_contentvec, str(contentvec.resolve()))
+        self.assertEqual(actual_rmvpe, str(rmvpe.resolve()))
+
+    def test_rinna_hubert_embedder_folder_is_discovered(self) -> None:
+        from vc_next_sidecar.live_worker import discover_feature_models
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "Voice Changer" / "model" / "voice.pth"
+            contentvec = root / "Voice Changer" / "main" / "modules" / "rinna_hubert" / "rinna_hubert_base-f.onnx"
+            rmvpe = root / "Voice Changer" / "main" / "modules" / "rmvpe" / "rmvpe.onnx"
+            model.parent.mkdir(parents=True)
+            contentvec.parent.mkdir(parents=True)
+            rmvpe.parent.mkdir(parents=True)
+            model.write_bytes(b"model")
+            contentvec.write_bytes(b"content")
+            rmvpe.write_bytes(b"pitch")
+
+            actual_contentvec, actual_rmvpe = discover_feature_models(str(model))
+
+        self.assertEqual(actual_contentvec, str(contentvec.resolve()))
+        self.assertEqual(actual_rmvpe, str(rmvpe.resolve()))
+
+    def test_hubert_l12_package_hint_matches_w_okada_contentvec(self) -> None:
+        import json
+
+        from vc_next_sidecar.live_worker import discover_feature_models
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "Voice Changer" / "model_dir" / "5" / "voice.pth"
+            contentvec = root / "Voice Changer" / "main" / "modules" / "contentvec" / "contentvec-f.onnx"
+            rinna = root / "Voice Changer" / "main" / "modules" / "rinna_hubert" / "rinna_hubert_base-f.onnx"
+            rmvpe = root / "Voice Changer" / "main" / "modules" / "rmvpe" / "rmvpe_onnx.onnx"
+            model.parent.mkdir(parents=True)
+            contentvec.parent.mkdir(parents=True)
+            rinna.parent.mkdir(parents=True)
+            rmvpe.parent.mkdir(parents=True)
+            model.write_bytes(b"model")
+            contentvec.write_bytes(b"contentvec")
+            rinna.write_bytes(b"rinna")
+            rmvpe.write_bytes(b"pitch")
+            (model.parent / "params.json").write_text(
+                json.dumps({"embedder": "hubert_base_l12"}), encoding="utf-8"
+            )
+
+            actual_contentvec, actual_rmvpe = discover_feature_models(
+                str(model), "hubert_base_l12"
+            )
+
+        self.assertEqual(actual_contentvec, str(contentvec.resolve()))
+        self.assertEqual(actual_rmvpe, str(rmvpe.resolve()))
+
+    def test_explicit_rinna_hint_prefers_rinna_when_both_assets_exist(self) -> None:
+        from vc_next_sidecar.live_worker import discover_feature_models
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "Voice Changer" / "model_dir" / "5" / "voice.pth"
+            contentvec = root / "Voice Changer" / "main" / "modules" / "contentvec" / "contentvec-f.onnx"
+            rinna = root / "Voice Changer" / "main" / "modules" / "rinna_hubert" / "rinna_hubert_base-f.onnx"
+            rmvpe = root / "Voice Changer" / "main" / "modules" / "rmvpe" / "rmvpe_onnx.onnx"
+            model.parent.mkdir(parents=True)
+            contentvec.parent.mkdir(parents=True)
+            rinna.parent.mkdir(parents=True)
+            rmvpe.parent.mkdir(parents=True)
+            model.write_bytes(b"model")
+            contentvec.write_bytes(b"contentvec")
+            rinna.write_bytes(b"rinna")
+            rmvpe.write_bytes(b"pitch")
+
+            actual_contentvec, actual_rmvpe = discover_feature_models(
+                str(model), "rinna_hubert"
+            )
+
+        self.assertEqual(actual_contentvec, str(rinna.resolve()))
+        self.assertEqual(actual_rmvpe, str(rmvpe.resolve()))
+
+    def test_missing_feature_assets_report_search_locations(self) -> None:
+        from vc_next_sidecar.live_worker import discover_feature_models
+
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "Voice Changer" / "model" / "voice.pth"
+            model.parent.mkdir(parents=True)
+            model.write_bytes(b"model")
+
+            with self.assertRaisesRegex(ValueError, "Missing: ContentVec \(.onnx\), RMVPE \(.onnx\)") as context:
+                discover_feature_models(str(model))
+
+        self.assertIn("searched:", str(context.exception))
+        self.assertIn("main\\modules", str(context.exception))
+
     def test_handshake_reports_the_streaming_shape(self) -> None:
         import json
 
@@ -82,7 +191,7 @@ class AssetDiscoveryTests(unittest.TestCase):
         self.assertFalse(should_stop)
         self.assertEqual(result["chunkFrames"], 9_600)
         self.assertEqual(result["analysisFrames"], 24_000)
-        self.assertEqual(result["crossfadeFrames"], 1_920)
+        self.assertEqual(result["crossfadeFrames"], 4_096)
         self.assertEqual(result["solaSearchFrames"], 576)
 
     def test_streaming_presets_have_valid_distinct_shapes(self) -> None:
@@ -107,26 +216,70 @@ class AssetDiscoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             get_stream_profile("turbo")
 
+    def test_calibration_discards_profile_switch_warmup_and_restores_shape(self) -> None:
+        from vc_next_sidecar.live_worker import LiveRvcProcessor
+
+        processor = LiveRvcProcessor()
+        processor.generator = object()
+        processor.features = object()
+        calls: list[int] = []
+
+        def fake_convert(samples):
+            calls.append(int(samples.shape[0]))
+            return samples, {}
+
+        processor._convert_analysis_window = fake_convert
+        result = processor.calibrate()
+
+        self.assertEqual(len(calls), 12)
+        self.assertEqual(result["restoredPreset"], "balanced")
+        self.assertEqual(processor.streaming_preset, "balanced")
+        self.assertEqual(processor.chunk_frames, 9_600)
+        self.assertTrue(all(profile["stable"] for profile in result["profiles"]))
+        self.assertTrue(all(profile["sampleCount"] == 3 for profile in result["profiles"]))
+
     def test_f0_threshold_range_is_validated(self) -> None:
         from vc_next_sidecar.stream_config import validate_f0_threshold
 
-        self.assertEqual(validate_f0_threshold(0.03), 0.03)
-        for value in (0.0, 0.21, float("nan")):
+        self.assertEqual(validate_f0_threshold(0.30), 0.30)
+        for value in (0.0, 1.0, float("nan")):
             with self.assertRaises(ValueError):
                 validate_f0_threshold(value)
 
     def test_custom_stream_shape_is_validated_and_stitch_safe(self) -> None:
         from vc_next_sidecar.stream_config import get_stream_profile
 
+        w_okada_shape = get_stream_profile(
+            "balanced", chunk_frames=24_000, extra_frames=24_000
+        )
+        self.assertEqual(w_okada_shape.crossfade_frames, 4_096)
+        self.assertEqual(w_okada_shape.sola_search_frames, 576)
+        self.assertEqual(w_okada_shape.analysis_frames, 32_768)
+
+        v2_shape = get_stream_profile(
+            "balanced", chunk_frames=24_000, extra_frames=24_000, rvc_version="v2"
+        )
+        # RVCr2 converts this 48 kHz window at 16 kHz, rounds convertSize to a
+        # 160-sample feature hop, then returns to the device rate: 33,120 frames.
+        self.assertEqual(v2_shape.analysis_frames, 33_120)
+        self.assertEqual(v2_shape.analysis_frames % 480, 0)
+
         profile = get_stream_profile(
             "balanced", chunk_frames=49_152, extra_frames=3_840
         )
         self.assertEqual(profile.chunk_frames, 49_152)
+        self.assertEqual(profile.analysis_frames % 128, 0)
         self.assertGreaterEqual(
             profile.analysis_frames,
             profile.chunk_frames
             + profile.crossfade_frames
             + profile.sola_search_frames,
+        )
+        tiny = get_stream_profile("balanced", chunk_frames=3_072, extra_frames=3_840)
+        self.assertLess(tiny.crossfade_frames, 4_096)
+        self.assertGreaterEqual(
+            tiny.analysis_frames,
+            tiny.chunk_frames + tiny.crossfade_frames + tiny.sola_search_frames,
         )
         with self.assertRaises(ValueError):
             get_stream_profile("balanced", chunk_frames=479)
@@ -139,6 +292,132 @@ class AssetDiscoveryTests(unittest.TestCase):
         for value in (-50.1, 50.1, float("nan")):
             with self.assertRaises(ValueError):
                 validate_pitch_shift(value)
+
+    def test_load_rejects_invalid_settings_before_touching_model_files(self) -> None:
+        from vc_next_sidecar.live_worker import LiveRvcProcessor
+
+        processor = LiveRvcProcessor()
+        with self.assertRaisesRegex(ValueError, "Pitch shift"):
+            processor.load({"modelPath": "C:/missing/voice.pth", "pitchShift": 50.1})
+        self.assertEqual(processor.status()["state"], "empty")
+
+    def test_load_reports_missing_feature_assets_clearly(self) -> None:
+        from vc_next_sidecar.live_worker import LiveRvcProcessor
+
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "voice.pth"
+            model.write_bytes(b"checkpoint")
+            processor = LiveRvcProcessor()
+            with self.assertRaisesRegex(ValueError, "ContentVec and RMVPE assets"):
+                processor.load({"modelPath": str(model)})
+            self.assertEqual(processor.status()["state"], "empty")
+
+    def test_silence_gate_rejects_empty_noise_floor_and_isolated_peaks(self) -> None:
+        import numpy as np
+
+        from vc_next_sidecar.live_worker import (
+            is_silent_input,
+            input_signal_levels,
+        )
+
+        empty = np.full(9_600, 0.00018, dtype=np.float32)
+        virtual_bus_floor = np.full(9_600, 0.0016, dtype=np.float32)
+        isolated_peak = np.zeros(9_600, dtype=np.float32)
+        isolated_peak[4_800] = 0.01
+        speech = np.zeros(9_600, dtype=np.float32)
+        speech[4_000:5_000] = 0.01
+        quiet_speech = np.zeros(9_600, dtype=np.float32)
+        quiet_speech[4_000:5_000] = 0.005
+
+        empty_rms, empty_peak = input_signal_levels(empty)
+        self.assertAlmostEqual(empty_rms, 0.00018, places=6)
+        self.assertAlmostEqual(empty_peak, 0.00018, places=6)
+        self.assertTrue(is_silent_input(empty))
+        self.assertTrue(is_silent_input(virtual_bus_floor))
+        self.assertTrue(is_silent_input(isolated_peak))
+        self.assertFalse(is_silent_input(speech))
+        self.assertFalse(is_silent_input(quiet_speech))
+
+    def test_rvc_volume_gain_matches_w_okada_formula(self) -> None:
+        import numpy as np
+
+        from vc_next_sidecar.live_worker import rvc_volume_gain
+
+        source = np.asarray([-0.25, 0.25, 0.5, -0.5], dtype=np.float32)
+        rms, gain = rvc_volume_gain(source)
+        self.assertAlmostEqual(rms, float(np.sqrt(np.mean(np.square(source)))), places=6)
+        self.assertAlmostEqual(gain, float(np.sqrt(rms)), places=6)
+
+    def test_silent_live_frame_bypasses_inference_and_resets_stitch_state(self) -> None:
+        import numpy as np
+
+        from vc_next_sidecar.live_worker import LiveRvcProcessor
+
+        processor = LiveRvcProcessor()
+        processor.generator = object()
+        processor.features = object()
+        converted_calls: list[int] = []
+
+        def fake_convert(samples):
+            converted_calls.append(int(samples.shape[0]))
+            return np.zeros_like(samples), {
+                "resample": 0.0,
+                "content": 0.0,
+                "pitch": 0.0,
+                "retrieval": 0.0,
+                "generator": 0.0,
+            }
+
+        processor._convert_analysis_window = fake_convert
+        silent = processor.process(np.zeros(processor.chunk_frames, dtype=np.float32))
+        self.assertEqual(float(np.max(np.abs(silent))), 0.0)
+        self.assertEqual(converted_calls, [])
+        self.assertEqual(processor.silence_suppressed_calls, 1)
+        self.assertFalse(processor.stitcher.primed)
+
+        voiced = np.zeros(processor.chunk_frames, dtype=np.float32)
+        voiced[processor.chunk_frames // 3 : processor.chunk_frames // 2] = 0.01
+        processor.process(voiced)
+        self.assertEqual(converted_calls, [processor.analysis_frames])
+
+    def test_v2_history_resamples_each_live_hop_before_appending(self) -> None:
+        import numpy as np
+        from types import SimpleNamespace
+
+        from vc_next_sidecar.live_worker import LiveRvcProcessor
+        from vc_next_sidecar.rvc_compat.resampling import resample_kaiser_fast
+
+        processor = LiveRvcProcessor()
+        processor.generator = SimpleNamespace(rvc_version="v2")
+        processor.features = object()
+        processor._configure_stream(
+            "balanced",
+            chunk_frames=9_600,
+            extra_frames=24_000,
+            rvc_version="v2",
+        )
+
+        def fake_convert(samples):
+            return np.zeros_like(samples), {
+                "resample": processor._pending_resample_ms,
+                "content": 0.0,
+                "pitch": 0.0,
+                "retrieval": 0.0,
+                "generator": 0.0,
+            }
+
+        processor._convert_analysis_window = fake_convert
+        source = np.linspace(-0.1, 0.1, processor.chunk_frames, dtype=np.float32)
+        processor.process(source)
+
+        expected = resample_kaiser_fast(source, 48_000, 16_000)
+        self.assertIsNotNone(processor.feature_history)
+        np.testing.assert_allclose(
+            processor.feature_history[-expected.shape[0] :],
+            expected,
+            rtol=1e-5,
+            atol=1e-6,
+        )
 
 
 @unittest.skipUnless(
@@ -184,6 +463,90 @@ class RetrievalIndexTests(unittest.TestCase):
         self.assertEqual(loaded.dimension, 3)
         self.assertEqual(blended.shape, source.shape)
         self.assertGreater(float(blended[0, 0, 0]), float(blended[0, 0, 1]))
+
+    def test_flat_index_defaults_to_w_okada_nearest_neighbor_and_can_weight_neighbors(self) -> None:
+        import faiss
+        import numpy as np
+
+        from vc_next_sidecar.rvc_compat.retrieval import FaissFeatureIndex
+
+        vectors = np.asarray(
+            [[1.0, 0.0], [0.0, 1.0]],
+            dtype=np.float32,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "voice.index"
+            index = faiss.IndexFlatL2(2)
+            index.add(vectors)
+            faiss.write_index(index, str(path))
+            loaded = FaissFeatureIndex.load(str(path), expected_dimension=2)
+            source = np.asarray([[[0.8, 0.2]]], dtype=np.float32)
+            nearest = loaded.blend(source, 1.0)
+            weighted = loaded.blend(source, 1.0, neighbor_count=2)
+
+        np.testing.assert_allclose(nearest, np.asarray([[[1.0, 0.0]]], dtype=np.float32))
+        self.assertNotEqual(float(weighted[0, 0, 1]), 0.0)
+
+    def test_retrieval_front_context_preserves_feature_length(self) -> None:
+        import faiss
+        import numpy as np
+
+        from vc_next_sidecar.rvc_compat.offline import _blend_retrieval_with_silence_front
+        from vc_next_sidecar.rvc_compat.retrieval import FaissFeatureIndex
+
+        vectors = np.asarray(
+            [[1.0, 0.0], [0.0, 1.0]],
+            dtype=np.float32,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "voice.index"
+            index = faiss.IndexFlatL2(2)
+            index.add(vectors)
+            faiss.write_index(index, str(path))
+            loaded = FaissFeatureIndex.load(str(path), expected_dimension=2)
+            source = np.asarray(
+                [[[0.0, 0.0], [0.2, 0.8], [0.8, 0.2], [0.9, 0.1]]],
+                dtype=np.float32,
+            )
+            blended = _blend_retrieval_with_silence_front(source, loaded, 1.0, 1)
+
+        self.assertEqual(blended.shape, source.shape)
+        np.testing.assert_allclose(blended[0, 0], source[0, 0])
+
+    def test_retrieval_front_context_can_use_rolling_live_features(self) -> None:
+        import faiss
+        import numpy as np
+
+        from vc_next_sidecar.rvc_compat.offline import _blend_retrieval_with_silence_front
+        from vc_next_sidecar.rvc_compat.retrieval import FaissFeatureIndex
+
+        vectors = np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "voice.index"
+            index = faiss.IndexFlatL2(2)
+            index.add(vectors)
+            faiss.write_index(index, str(path))
+            loaded = FaissFeatureIndex.load(str(path), expected_dimension=2)
+            source = np.asarray(
+                [[[0.0, 0.0], [0.2, 0.8], [0.8, 0.2], [0.9, 0.1]]],
+                dtype=np.float32,
+            )
+            rolling = np.asarray(
+                [[9.0, 8.0], [7.0, 6.0], [5.0, 4.0], [3.0, 2.0]],
+                dtype=np.float32,
+            )
+            blended = _blend_retrieval_with_silence_front(
+                source,
+                loaded,
+                1.0,
+                1,
+                rolling,
+            )
+
+        self.assertEqual(blended.shape, source.shape)
+        # The rolling prefix occupies the same slot that w-okada's
+        # ``feature_buffer[:npyOffset:2]`` occupies after tail cropping.
+        np.testing.assert_allclose(blended[0, 0], np.asarray([9.0, 8.0]))
 
     def test_index_dimension_mismatch_is_rejected(self) -> None:
         import faiss

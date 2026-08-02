@@ -15,9 +15,13 @@ PACKAGE_CANDIDATES: dict[str, tuple[str, ...]] = {
     "onnxruntime": ("onnxruntime-gpu", "onnxruntime"),
     "faiss": ("faiss-gpu", "faiss-cpu"),
     "soundfile": ("soundfile",),
+    "resampy": ("resampy",),
 }
 
-REQUIRED_PACKAGES = {"numpy", "torch", "torchaudio", "soundfile"}
+# ContentVec and RMVPE are part of every live RVC session, so ONNX Runtime is
+# required even when the selected generator is a PyTorch checkpoint. FAISS is
+# intentionally optional because a voice can run without retrieval.
+REQUIRED_PACKAGES = {"numpy", "torch", "torchaudio", "soundfile", "onnxruntime"}
 
 
 def _package_version(candidates: tuple[str, ...]) -> str | None:
@@ -67,12 +71,33 @@ def probe_runtime() -> dict[str, Any]:
         except Exception as error:
             torch_runtime["error"] = str(error)
 
+    onnx_runtime: dict[str, Any] = {
+        "imported": False,
+        "availableProviders": [],
+        "cudaProviderAvailable": False,
+        "error": None,
+    }
+    if packages["onnxruntime"] is not None:
+        try:
+            import onnxruntime as ort
+
+            providers = list(ort.get_available_providers())
+            onnx_runtime["imported"] = True
+            onnx_runtime["availableProviders"] = providers
+            onnx_runtime["cudaProviderAvailable"] = "CUDAExecutionProvider" in providers
+        except Exception as error:
+            onnx_runtime["error"] = str(error)
+
     blockers: list[str] = []
     if not python_for_rvc:
         blockers.append("Python 3.11 environment not selected")
     blockers.extend(f"{name} is not installed" for name in missing_required)
     if packages["torch"] is not None and not torch_runtime["cudaAvailable"]:
         blockers.append("CUDA is not available to PyTorch")
+    if packages["onnxruntime"] is not None and not onnx_runtime["imported"]:
+        blockers.append("ONNX Runtime could not be imported")
+    elif packages["onnxruntime"] is not None and not onnx_runtime["cudaProviderAvailable"]:
+        blockers.append("ONNX Runtime CUDA provider is unavailable")
 
     return {
         "source": "python-sidecar",
@@ -88,12 +113,14 @@ def probe_runtime() -> dict[str, Any]:
         },
         "packages": packages,
         "torchRuntime": torch_runtime,
+        "onnxRuntime": onnx_runtime,
         "capabilities": [
             "runtime-probe",
             "safe-model-inspection",
             "trusted-checkpoint-inspection",
             "offline-rvc-conversion",
             "faiss-index-retrieval" if packages["faiss"] else "index-retrieval-unavailable",
+            "onnx-cuda-provider" if onnx_runtime["cudaProviderAvailable"] else "onnx-cpu-only",
             "versioned-stdio-control",
         ],
         "readyForRvc": not blockers,

@@ -62,10 +62,23 @@ def main() -> int:
     parser.add_argument("--output")
     parser.add_argument("--pitch-shift", type=float, default=0.0)
     parser.add_argument("--index")
+    parser.add_argument(
+        "--contentvec",
+        help="Optional explicit ContentVec/Rinna Hubert ONNX asset; otherwise discover it from the package.",
+    )
+    parser.add_argument(
+        "--rmvpe",
+        help="Optional explicit RMVPE ONNX asset; otherwise discover it from the package.",
+    )
     parser.add_argument("--index-ratio", type=float, default=0.0)
     parser.add_argument("--protect-ratio", type=float, default=0.33)
     parser.add_argument("--speaker-id", type=int, default=0)
-    parser.add_argument("--f0-threshold", type=float, default=0.03)
+    parser.add_argument("--f0-threshold", type=float, default=0.30)
+    parser.add_argument(
+        "--use-package-defaults",
+        action="store_true",
+        help="Let the worker import pitch/index/protection/chunk/embedder defaults from params.json.",
+    )
     parser.add_argument(
         "--streaming-preset",
         choices=("quality", "balanced", "latency"),
@@ -91,20 +104,32 @@ def main() -> int:
         if handshake.kind != JSON_RESPONSE:
             raise RuntimeError("The live worker handshake returned the wrong frame kind.")
 
-        load_payload = json.dumps(
-            {
-                "method": "load_model",
-                "params": {
-                    "modelPath": args.model,
+        load_params: dict[str, object] = {
+            "modelPath": args.model,
+            "streamingPreset": args.streaming_preset,
+        }
+        if args.use_package_defaults:
+            # An explicit index can still be supplied to override package discovery,
+            # while all model-tuning fields remain metadata-driven.
+            if args.index:
+                load_params["indexPath"] = args.index
+        else:
+            load_params.update(
+                {
                     "indexPath": args.index,
                     "pitchShift": args.pitch_shift,
                     "indexRatio": args.index_ratio,
                     "protectRatio": args.protect_ratio,
                     "speakerId": args.speaker_id,
                     "f0Threshold": args.f0_threshold,
-                    "streamingPreset": args.streaming_preset,
-                },
-            },
+                }
+            )
+        if args.contentvec:
+            load_params["contentvecPath"] = args.contentvec
+        if args.rmvpe:
+            load_params["rmvpePath"] = args.rmvpe
+        load_payload = json.dumps(
+            {"method": "load_model", "params": load_params},
             separators=(",", ":"),
         ).encode("utf-8")
         load_started = perf_counter()

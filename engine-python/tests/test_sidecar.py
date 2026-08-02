@@ -12,9 +12,10 @@ import unittest
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_ROOT))
 
-from vc_next_sidecar.model_probe import inspect_model  # noqa: E402
+from vc_next_sidecar.model_probe import inspect_model, model_package_defaults  # noqa: E402
 from vc_next_sidecar.checkpoint_probe import inspect_trusted_checkpoint, summarize_checkpoint  # noqa: E402
 from vc_next_sidecar.protocol import ProtocolError, handle_request  # noqa: E402
+from vc_next_sidecar.runtime import probe_runtime  # noqa: E402
 
 
 class ProtocolTests(unittest.TestCase):
@@ -43,6 +44,14 @@ class ProtocolTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.code, "unknown_method")
 
+    def test_runtime_probe_reports_onnx_provider_contract(self) -> None:
+        result = probe_runtime()
+        self.assertIn("onnxRuntime", result)
+        self.assertIn("availableProviders", result["onnxRuntime"])
+        self.assertIn("cudaProviderAvailable", result["onnxRuntime"])
+        capability = "onnx-cuda-provider" if result["onnxRuntime"]["cudaProviderAvailable"] else "onnx-cpu-only"
+        self.assertIn(capability, result["capabilities"])
+
     def test_once_process_returns_one_json_response(self) -> None:
         request = json.dumps(
             {
@@ -59,7 +68,10 @@ class ProtocolTests(unittest.TestCase):
             text=True,
             capture_output=True,
             check=True,
-            timeout=10,
+            # Importing the CUDA/ONNX runtime can take several seconds on a cold
+            # Windows process. Keep this strict enough to catch a hung sidecar,
+            # without making normal first-start initialization flaky.
+            timeout=30,
         )
         response = json.loads(completed.stdout)
         self.assertTrue(response["ok"])
@@ -100,6 +112,44 @@ class ModelInspectionTests(unittest.TestCase):
         self.assertEqual(result["siblingIndexes"][0], str(matching.resolve()))
         self.assertTrue(result["packageComplete"])
 
+    def test_nearby_w_okada_package_index_is_discovered(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_dir = root / "model_dir"
+            selected_slot = model_dir / "5"
+            neighboring_slot = model_dir / "7"
+            selected_slot.mkdir(parents=True)
+            neighboring_slot.mkdir(parents=True)
+            model = selected_slot / "voice.pth"
+            nearby = neighboring_slot / "voice.index"
+            unrelated = neighboring_slot / "other.index"
+            model.write_bytes(b"checkpoint")
+            nearby.write_bytes(b"index")
+            unrelated.write_bytes(b"index")
+
+            result = inspect_model(str(model))
+
+        self.assertEqual(result["recommendedIndex"], str(nearby.resolve()))
+        self.assertIn(str(nearby.resolve()), result["siblingIndexes"])
+        self.assertNotIn(str(unrelated.resolve()), result["siblingIndexes"])
+        self.assertIn("surrounding model package", result["pairingNote"])
+
+    def test_index_folder_next_to_model_is_discovered(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_folder = root / "model"
+            index_folder = model_folder / "indexes"
+            index_folder.mkdir(parents=True)
+            model = model_folder / "e-girl_e350_s42700.pth"
+            matching = index_folder / "added_IVF1611_Flat_nprobe_1_e-girl_v2.index"
+            model.write_bytes(b"checkpoint")
+            matching.write_bytes(b"index")
+
+            result = inspect_model(str(model))
+
+        self.assertEqual(result["recommendedIndex"], str(matching.resolve()))
+        self.assertIn("surrounding model package", result["pairingNote"])
+
     def test_checkpoint_without_index_remains_usable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model = Path(directory) / "voice.pth"
@@ -109,6 +159,46 @@ class ModelInspectionTests(unittest.TestCase):
         self.assertIsNone(result["recommendedIndex"])
         self.assertFalse(result["packageComplete"])
         self.assertIn("can still run", result["pairingNote"])
+
+    def test_w_okada_params_are_exposed_as_safe_model_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "voice.pth"
+            model.write_bytes(b"checkpoint")
+            (root / "params.json").write_text(
+                json.dumps(
+                    {
+                        "pitch_shift": 14,
+                        "index_ratio": 0.3,
+                        "protect_ratio": 0.5,
+                        "chunk_sec": 0.5,
+                        "embedder": "hubert_base_l12",
+                        "pitch_estimator": "rmvpe_onnx",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = inspect_model(str(model))
+            defaults = model_package_defaults(model)
+
+        self.assertEqual(result["modelDefaults"]["pitchShift"], 14.0)
+        self.assertEqual(result["modelDefaults"]["indexRatio"], 0.3)
+        self.assertEqual(result["modelDefaults"]["protectRatio"], 0.5)
+        self.assertEqual(result["modelDefaults"]["chunkFrames"], 24_000)
+        self.assertEqual(defaults["embedder"], "hubert_base_l12")
+
+    def test_invalid_or_oversized_params_do_not_block_inspection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "voice.pth"
+            model.write_bytes(b"checkpoint")
+            (root / "params.json").write_text(
+                json.dumps({"pitch_shift": 999, "index_ratio": "bad"}),
+                encoding="utf-8",
+            )
+            result = inspect_model(str(model))
+
+        self.assertEqual(result["modelDefaults"], {})
 
     def test_rvc_checkpoint_schema_is_summarized_without_model_code(self) -> None:
         class FakeEmbedding:
