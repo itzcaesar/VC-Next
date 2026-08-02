@@ -2,6 +2,10 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -12,13 +16,23 @@ use serde::Serialize;
 
 use crate::inference::{
     InferenceBackend, InferenceTelemetry, InferenceWorker, NoopInferenceBackend,
-    WORKER_CHUNK_FRAMES,
+    INFERENCE_SAMPLE_RATE, WORKER_CHUNK_FRAMES,
 };
 use crate::live_sidecar::{LiveRvcClient, LiveRvcInferenceBackend};
 
 const RING_BUFFER_FRAMES: usize = 96_000;
-const INITIAL_PRIME_FRAMES: usize = WORKER_CHUNK_FRAMES * 2;
+// Keep the far-end reference bounded so device-clock drift cannot accumulate stale data.
+const ECHO_REFERENCE_RING_FRAMES: usize = 8_192;
+const ECHO_HISTORY_FRAMES: usize = 2_048;
+const ECHO_TAPS: usize = 64;
+const ECHO_DELAY_FRAMES: usize = 480;
+// Keep enough converted audio to cover a normal RVC hop plus a short CUDA or
+// WASAPI scheduling spike. This is still bounded (40 ms at 48 kHz) and can
+// grow to the 100 ms adaptive ceiling after a real underrun.
+const INITIAL_PRIME_FRAMES: usize = WORKER_CHUNK_FRAMES * 4;
+const STARTUP_PRIME_FRAMES: usize = WORKER_CHUNK_FRAMES * 8;
 const MAX_PRIME_FRAMES: usize = WORKER_CHUNK_FRAMES * 10;
+const STARTUP_PRIME_TIMEOUT: Duration = Duration::from_millis(1_000);
 const DRIFT_HIGH_MARGIN_FRAMES: usize = WORKER_CHUNK_FRAMES * 2;
 const DRIFT_LOW_WATERMARK_FRAMES: usize = WORKER_CHUNK_FRAMES / 2;
 
@@ -58,6 +72,7 @@ pub struct AudioEngineStatus {
     input_channels: Option<u16>,
     output_channels: Option<u16>,
     monitor_channels: Option<u16>,
+    inference_sample_rate: u32,
     buffer_capacity_frames: usize,
     buffered_frames: usize,
     capture_buffered_frames: usize,
@@ -86,6 +101,7 @@ pub struct AudioEngineStatus {
     max_inference_micros: u64,
     missed_inference_deadlines: u64,
     dropped_inference_frames: u64,
+    inference_silence_suppressed_calls: u64,
     input_peak: f32,
     output_peak: f32,
     monitor_peak: f32,
@@ -93,6 +109,9 @@ pub struct AudioEngineStatus {
     output_gain_db: f32,
     monitor_gain_db: f32,
     noise_gate_db: f32,
+    noise_suppression_strength: f32,
+    echo_control_strength: f32,
+    high_pass_enabled: bool,
     last_error: Option<String>,
 }
 
@@ -102,6 +121,9 @@ pub struct AudioProcessingSettings {
     output_gain_db: f32,
     monitor_gain_db: f32,
     noise_gate_db: f32,
+    noise_suppression_strength: f32,
+    echo_control_strength: f32,
+    high_pass_enabled: bool,
 }
 
 impl AudioProcessingSettings {
@@ -110,17 +132,29 @@ impl AudioProcessingSettings {
         output_gain_db: f32,
         monitor_gain_db: f32,
         noise_gate_db: f32,
+        noise_suppression_strength: f32,
+        echo_control_strength: f32,
     ) -> Result<Self, String> {
         validate_db("Input gain", input_gain_db, -24.0, 24.0)?;
         validate_db("Output gain", output_gain_db, -24.0, 12.0)?;
         validate_db("Monitor gain", monitor_gain_db, -24.0, 12.0)?;
         validate_db("Noise gate", noise_gate_db, -80.0, -20.0)?;
+        validate_strength("Noise suppression", noise_suppression_strength)?;
+        validate_strength("Echo control", echo_control_strength)?;
         Ok(Self {
             input_gain_db,
             output_gain_db,
             monitor_gain_db,
             noise_gate_db,
+            noise_suppression_strength,
+            echo_control_strength,
+            high_pass_enabled: false,
         })
+    }
+
+    pub fn with_high_pass(mut self, enabled: bool) -> Self {
+        self.high_pass_enabled = enabled;
+        self
     }
 }
 
@@ -131,6 +165,10 @@ impl Default for AudioProcessingSettings {
             output_gain_db: 0.0,
             monitor_gain_db: -6.0,
             noise_gate_db: -80.0,
+            // Fidelity-first default; suppression remains opt-in for noisy rooms.
+            noise_suppression_strength: 0.0,
+            echo_control_strength: 0.0,
+            high_pass_enabled: false,
         }
     }
 }
@@ -154,6 +192,7 @@ struct ActiveAudioEngine {
     input_channels: u16,
     output_channels: u16,
     monitor_channels: Option<u16>,
+    inference_sample_rate: u32,
     state: &'static str,
     processing: AudioProcessingSettings,
     telemetry: Arc<AudioTelemetry>,
@@ -164,6 +203,7 @@ struct AudioTelemetry {
     capture_ring: Arc<ArrayQueue<f32>>,
     playback_ring: Arc<ArrayQueue<f32>>,
     monitor_ring: Option<Arc<ArrayQueue<f32>>>,
+    echo_reference_ring: Arc<ArrayQueue<f32>>,
     inference: Arc<InferenceTelemetry>,
     captured_frames: AtomicU64,
     played_frames: AtomicU64,
@@ -180,6 +220,7 @@ struct AudioTelemetry {
     drift_repeated_frames: AtomicU64,
     monitor_drift_dropped_frames: AtomicU64,
     monitor_drift_repeated_frames: AtomicU64,
+    monitor_enabled: AtomicBool,
     input_peak_bits: AtomicU32,
     output_peak_bits: AtomicU32,
     monitor_peak_bits: AtomicU32,
@@ -193,12 +234,15 @@ impl AudioTelemetry {
         capture_ring: Arc<ArrayQueue<f32>>,
         playback_ring: Arc<ArrayQueue<f32>>,
         monitor_ring: Option<Arc<ArrayQueue<f32>>>,
+        echo_reference_ring: Arc<ArrayQueue<f32>>,
         inference: Arc<InferenceTelemetry>,
     ) -> Self {
+        let monitor_enabled = monitor_ring.is_some();
         Self {
             capture_ring,
             playback_ring,
             monitor_ring,
+            echo_reference_ring,
             inference,
             captured_frames: AtomicU64::new(0),
             played_frames: AtomicU64::new(0),
@@ -215,6 +259,7 @@ impl AudioTelemetry {
             drift_repeated_frames: AtomicU64::new(0),
             monitor_drift_dropped_frames: AtomicU64::new(0),
             monitor_drift_repeated_frames: AtomicU64::new(0),
+            monitor_enabled: AtomicBool::new(monitor_enabled),
             input_peak_bits: AtomicU32::new(0),
             output_peak_bits: AtomicU32::new(0),
             monitor_peak_bits: AtomicU32::new(0),
@@ -228,6 +273,11 @@ impl AudioTelemetry {
         if let Ok(mut last_error) = self.last_error.lock() {
             *last_error = Some(message);
         }
+    }
+
+    fn disable_monitor(&self, message: String) {
+        self.monitor_enabled.store(false, Ordering::Release);
+        self.record_error(message);
     }
 }
 
@@ -257,9 +307,17 @@ impl AudioEngine {
         let host = cpal::default_host();
         let (input_device, input_name) = find_device(&host, DeviceDirection::Input, input_id)?;
         let (output_device, output_name) = find_device(&host, DeviceDirection::Output, output_id)?;
-        let monitor_device = monitor_id
-            .map(|id| find_device(&host, DeviceDirection::Output, id))
-            .transpose()?;
+        let mut monitor_route_error = None;
+        let monitor_device =
+            monitor_id.and_then(|id| match find_device(&host, DeviceDirection::Output, id) {
+                Ok(device) => Some(device),
+                Err(error) => {
+                    monitor_route_error = Some(format!(
+                        "Monitor disabled; the selected device is unavailable: {error}"
+                    ));
+                    None
+                }
+            });
 
         let input_supported = input_device
             .default_input_config()
@@ -267,32 +325,20 @@ impl AudioEngine {
         let output_supported = output_device
             .default_output_config()
             .map_err(|error| format!("Could not read the output format: {error}"))?;
-        let monitor_supported = monitor_device
-            .as_ref()
-            .map(|(device, _)| {
-                device
-                    .default_output_config()
-                    .map_err(|error| format!("Could not read the monitor format: {error}"))
-            })
-            .transpose()?;
+        let monitor_supported =
+            monitor_device
+                .as_ref()
+                .and_then(|(device, _)| match device.default_output_config() {
+                    Ok(config) => Some(config),
+                    Err(error) => {
+                        monitor_route_error = Some(format!(
+                            "Monitor disabled; the selected device format is unavailable: {error}"
+                        ));
+                        None
+                    }
+                });
 
         let input_rate = input_supported.sample_rate();
-        let output_rate = output_supported.sample_rate();
-        if input_rate != output_rate {
-            return Err(format!(
-                "Input runs at {input_rate} Hz but output runs at {output_rate} Hz. Set both Windows devices to the same sample rate before starting passthrough."
-            ));
-        }
-        if let Some(monitor_rate) = monitor_supported
-            .as_ref()
-            .map(|config| config.sample_rate())
-        {
-            if input_rate != monitor_rate {
-                return Err(format!(
-                    "Input and output run at {input_rate} Hz but monitor runs at {monitor_rate} Hz. Set all selected Windows devices to the same sample rate."
-                ));
-            }
-        }
 
         let input_channels = input_supported.channels();
         let output_channels = output_supported.channels();
@@ -305,6 +351,7 @@ impl AudioEngine {
         let capture_ring = Arc::new(ArrayQueue::new(RING_BUFFER_FRAMES));
         let playback_ring = Arc::new(ArrayQueue::new(RING_BUFFER_FRAMES));
         let monitor_ring = monitor_id.map(|_| Arc::new(ArrayQueue::new(RING_BUFFER_FRAMES)));
+        let echo_reference_ring = Arc::new(ArrayQueue::new(ECHO_REFERENCE_RING_FRAMES));
         let (backend, state): (Box<dyn InferenceBackend>, &'static str) = match live_client {
             Some(client) => (Box::new(LiveRvcInferenceBackend::new(client)), "rvc"),
             None => (Box::new(NoopInferenceBackend), "passthrough"),
@@ -319,8 +366,12 @@ impl AudioEngine {
             capture_ring,
             playback_ring,
             monitor_ring,
+            echo_reference_ring,
             inference_worker.telemetry(),
         ));
+        if let Some(error) = monitor_route_error {
+            telemetry.disable_monitor(error);
+        }
 
         let input_stream = build_input_stream(
             &input_device,
@@ -336,32 +387,60 @@ impl AudioEngine {
             Arc::clone(&telemetry),
             processing,
         )?;
-        let monitor_stream = match (
+        let mut monitor_stream = match (
+            telemetry.monitor_enabled.load(Ordering::Acquire),
             monitor_device.as_ref(),
             monitor_supported.as_ref(),
             monitor_config.as_ref(),
         ) {
-            (Some((device, _)), Some(supported), Some(config)) => Some(build_monitor_stream(
-                device,
-                supported.sample_format(),
-                config,
-                Arc::clone(&telemetry),
-                processing,
-            )?),
+            (false, _, _, _) => None,
+            (true, Some((device, _)), Some(supported), Some(config)) => {
+                match build_monitor_stream(
+                    device,
+                    supported.sample_format(),
+                    config,
+                    Arc::clone(&telemetry),
+                    processing,
+                ) {
+                    Ok(stream) => Some(stream),
+                    Err(error) => {
+                        // Monitoring is an optional side route. A busy or temporarily
+                        // incompatible monitor endpoint must not take down the main
+                        // converted output; keep the session alive and expose the reason
+                        // through the normal audio status error field.
+                        telemetry.disable_monitor(format!(
+                            "Monitor disabled; the selected device could not be opened: {error}"
+                        ));
+                        None
+                    }
+                }
+            }
             _ => None,
         };
 
-        if let Some(stream) = &monitor_stream {
-            stream
-                .play()
-                .map_err(|error| format!("Could not start the monitor stream: {error}"))?;
-        }
-        output_stream
-            .play()
-            .map_err(|error| format!("Could not start the output stream: {error}"))?;
+        // Let capture and inference establish the first playback cushion before opening the
+        // output device.  Starting all three streams at once made the output callback reach its
+        // prime threshold while the first CUDA/RVC call was still warming up, producing a
+        // one-time click/underrun even though the steady-state route was healthy.  The bounded
+        // wait keeps passthrough and silent devices responsive while protecting the real-time
+        // callback from startup starvation.
         input_stream
             .play()
             .map_err(|error| format!("Could not start the input stream: {error}"))?;
+        wait_for_startup_prime(&telemetry.playback_ring);
+        output_stream
+            .play()
+            .map_err(|error| format!("Could not start the output stream: {error}"))?;
+        if let Some(stream) = monitor_stream.as_ref() {
+            if let Err(error) = stream.play() {
+                telemetry.disable_monitor(format!(
+                    "Monitor disabled; the selected device could not start: {error}"
+                ));
+                monitor_stream = None;
+            }
+        }
+
+        let monitor_active = monitor_stream.is_some();
 
         self.active = Some(ActiveAudioEngine {
             _input_stream: input_stream,
@@ -369,14 +448,21 @@ impl AudioEngine {
             _monitor_stream: monitor_stream,
             input_device_id: input_id.to_owned(),
             output_device_id: output_id.to_owned(),
-            monitor_device_id: monitor_id.map(str::to_owned),
+            monitor_device_id: monitor_active
+                .then(|| monitor_id)
+                .flatten()
+                .map(str::to_owned),
             input_device_name: input_name,
             output_device_name: output_name,
-            monitor_device_name: monitor_device.map(|(_, name)| name),
+            monitor_device_name: monitor_active
+                .then(|| monitor_device)
+                .flatten()
+                .map(|(_, name)| name),
             sample_rate: input_rate,
             input_channels,
             output_channels,
-            monitor_channels,
+            monitor_channels: monitor_active.then_some(monitor_channels).flatten(),
+            inference_sample_rate: INFERENCE_SAMPLE_RATE,
             state,
             processing,
             telemetry,
@@ -393,6 +479,30 @@ impl AudioEngine {
         self.status()
     }
 
+    /// Recreate the native streams using the last selected route and processing settings.
+    /// Device callbacks cannot safely rebuild CPAL streams themselves, so recovery is exposed
+    /// as an explicit host-thread operation for the UI and future reconnect watcher.
+    pub fn restart(
+        &mut self,
+        live_client: Option<LiveRvcClient>,
+    ) -> Result<AudioEngineStatus, String> {
+        let Some(active) = self.active.as_ref() else {
+            return Err("There is no active audio session to restart.".to_owned());
+        };
+        let input_id = active.input_device_id.clone();
+        let output_id = active.output_device_id.clone();
+        let monitor_id = active.monitor_device_id.clone();
+        let processing = active.processing;
+        self.stop();
+        self.start(
+            &input_id,
+            &output_id,
+            monitor_id.as_deref(),
+            live_client,
+            processing,
+        )
+    }
+
     pub fn status(&self) -> AudioEngineStatus {
         let Some(active) = &self.active else {
             return AudioEngineStatus {
@@ -407,6 +517,7 @@ impl AudioEngine {
                 input_channels: None,
                 output_channels: None,
                 monitor_channels: None,
+                inference_sample_rate: INFERENCE_SAMPLE_RATE,
                 buffer_capacity_frames: RING_BUFFER_FRAMES,
                 buffered_frames: 0,
                 capture_buffered_frames: 0,
@@ -435,6 +546,7 @@ impl AudioEngine {
                 max_inference_micros: 0,
                 missed_inference_deadlines: 0,
                 dropped_inference_frames: 0,
+                inference_silence_suppressed_calls: 0,
                 input_peak: 0.0,
                 output_peak: 0.0,
                 monitor_peak: 0.0,
@@ -442,6 +554,9 @@ impl AudioEngine {
                 output_gain_db: 0.0,
                 monitor_gain_db: -6.0,
                 noise_gate_db: -80.0,
+                noise_suppression_strength: 0.0,
+                echo_control_strength: 0.0,
+                high_pass_enabled: false,
                 last_error: None,
             };
         };
@@ -465,6 +580,7 @@ impl AudioEngine {
             input_channels: Some(active.input_channels),
             output_channels: Some(active.output_channels),
             monitor_channels: active.monitor_channels,
+            inference_sample_rate: active.inference_sample_rate,
             buffer_capacity_frames: RING_BUFFER_FRAMES,
             buffered_frames: telemetry.playback_ring.len(),
             capture_buffered_frames: telemetry.capture_ring.len(),
@@ -499,6 +615,7 @@ impl AudioEngine {
             max_inference_micros: inference.max_process_micros,
             missed_inference_deadlines: inference.missed_deadlines,
             dropped_inference_frames: inference.dropped_output_frames,
+            inference_silence_suppressed_calls: inference.silence_suppressed_calls,
             input_peak: f32::from_bits(telemetry.input_peak_bits.load(Ordering::Relaxed)),
             output_peak: f32::from_bits(telemetry.output_peak_bits.load(Ordering::Relaxed)),
             monitor_peak: f32::from_bits(telemetry.monitor_peak_bits.load(Ordering::Relaxed)),
@@ -506,8 +623,18 @@ impl AudioEngine {
             output_gain_db: active.processing.output_gain_db,
             monitor_gain_db: active.processing.monitor_gain_db,
             noise_gate_db: active.processing.noise_gate_db,
+            noise_suppression_strength: active.processing.noise_suppression_strength,
+            echo_control_strength: active.processing.echo_control_strength,
+            high_pass_enabled: active.processing.high_pass_enabled,
             last_error: audio_error.or(inference.last_error),
         }
+    }
+}
+
+fn wait_for_startup_prime(playback_ring: &ArrayQueue<f32>) {
+    let deadline = Instant::now() + STARTUP_PRIME_TIMEOUT;
+    while playback_ring.len() < STARTUP_PRIME_FRAMES && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -664,7 +791,11 @@ where
                 let mut peak = 0.0_f32;
                 for frame in data.chunks_exact(channels) {
                     let mono = frame.iter().copied().map(convert).sum::<f32>() / channels as f32;
-                    let processed = input_processor.process(mono);
+                    // Consume one far-end sample for every captured sample. When the output
+                    // device is unavailable or its callback is late, a missing reference is
+                    // treated as silence instead of reusing stale audio.
+                    let echo_reference = telemetry.echo_reference_ring.pop().unwrap_or(0.0);
+                    let processed = input_processor.process(mono, echo_reference);
                     peak = peak.max(processed.abs());
                     if telemetry.capture_ring.push(processed).is_err() {
                         telemetry.overruns.fetch_add(1, Ordering::Relaxed);
@@ -681,7 +812,7 @@ where
         .map_err(|error| format!("Could not create the input stream: {error}"))
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct StableRead {
     sample: f32,
     primed: bool,
@@ -699,6 +830,86 @@ struct AdaptivePlayback {
     frames_until_correction: usize,
     stable_frames: u64,
     last_sample: f32,
+}
+
+/// Converts the fixed 48 kHz inference stream to an output/monitor device rate. It uses
+/// one-sample linear interpolation with persistent phase so 44.1/48/96 kHz endpoints do
+/// not require a hard rejection or a discontinuous per-callback ratio reset.
+struct OutputResampler {
+    source_rate: u32,
+    target_rate: u32,
+    step: f64,
+    phase: f64,
+    current: f32,
+    next: f32,
+    initialized: bool,
+}
+
+impl OutputResampler {
+    fn new(source_rate: u32, target_rate: u32) -> Self {
+        Self {
+            source_rate,
+            target_rate,
+            step: source_rate as f64 / target_rate as f64,
+            phase: 0.0,
+            current: 0.0,
+            next: 0.0,
+            initialized: false,
+        }
+    }
+
+    fn read(&mut self, stability: &mut AdaptivePlayback, ring: &ArrayQueue<f32>) -> StableRead {
+        if self.source_rate == self.target_rate {
+            return stability.read(ring);
+        }
+
+        if !self.initialized {
+            let first = stability.read(ring);
+            if !first.primed {
+                return first;
+            }
+            let second = stability.read(ring);
+            let mut startup = first;
+            merge_stable_read(&mut startup, &second);
+            if !second.primed {
+                return startup;
+            }
+            self.current = first.sample;
+            self.next = second.sample;
+            self.phase = 0.0;
+            self.initialized = true;
+        }
+
+        let fraction = self.phase as f32;
+        let mut result = StableRead {
+            sample: self.current + (self.next - self.current) * fraction,
+            primed: true,
+            ..StableRead::default()
+        };
+        self.phase += self.step;
+        while self.phase >= 1.0 {
+            self.phase -= 1.0;
+            self.current = self.next;
+            let next = stability.read(ring);
+            merge_stable_read(&mut result, &next);
+            self.next = next.sample;
+            if !next.primed {
+                self.phase = 0.0;
+                self.initialized = false;
+                break;
+            }
+        }
+        result
+    }
+}
+
+fn merge_stable_read(target: &mut StableRead, next: &StableRead) {
+    target.primed &= next.primed;
+    target.underrun |= next.underrun;
+    target.reprime |= next.reprime;
+    target.dropped |= next.dropped;
+    target.repeated |= next.repeated;
+    target.target_changed |= next.target_changed;
 }
 
 impl AdaptivePlayback {
@@ -816,13 +1027,14 @@ where
     let output_gain = db_to_linear(processing.output_gain_db);
     let error_telemetry = Arc::clone(&telemetry);
     let mut stability = AdaptivePlayback::new(config.sample_rate);
+    let mut resampler = OutputResampler::new(INFERENCE_SAMPLE_RATE, config.sample_rate);
     device
         .build_output_stream(
             *config,
             move |data: &mut [T], _| {
                 let mut peak = 0.0_f32;
                 for frame in data.chunks_exact_mut(channels) {
-                    let stable = stability.read(&telemetry.playback_ring);
+                    let stable = resampler.read(&mut stability, &telemetry.playback_ring);
                     telemetry.primed.store(stable.primed, Ordering::Release);
                     if stable.underrun {
                         telemetry.underruns.fetch_add(1, Ordering::Relaxed);
@@ -846,14 +1058,22 @@ where
                             .store(stability.target_frames, Ordering::Relaxed);
                     }
                     let sample = stable.sample;
-                    if let Some(monitor_ring) = &telemetry.monitor_ring {
-                        if monitor_ring.push(sample).is_err() {
-                            let _ = monitor_ring.pop();
-                            let _ = monitor_ring.push(sample);
-                            telemetry.monitor_overruns.fetch_add(1, Ordering::Relaxed);
+                    if telemetry.monitor_enabled.load(Ordering::Acquire) {
+                        if let Some(monitor_ring) = &telemetry.monitor_ring {
+                            if monitor_ring.push(sample).is_err() {
+                                let _ = monitor_ring.pop();
+                                let _ = monitor_ring.push(sample);
+                                telemetry.monitor_overruns.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                     let sample = (sample * output_gain).clamp(-1.0, 1.0);
+                    // Feed the actual post-gain signal to the input preprocessor. This is the
+                    // far-end reference used by echo control, not the optional monitor route.
+                    if telemetry.echo_reference_ring.push(sample).is_err() {
+                        let _ = telemetry.echo_reference_ring.pop();
+                        let _ = telemetry.echo_reference_ring.push(sample);
+                    }
                     peak = peak.max(sample.abs());
                     let converted = convert(sample);
                     frame.fill(converted);
@@ -917,13 +1137,14 @@ where
     let monitor_gain = db_to_linear(processing.monitor_gain_db);
     let error_telemetry = Arc::clone(&telemetry);
     let mut stability = AdaptivePlayback::new(config.sample_rate);
+    let mut resampler = OutputResampler::new(INFERENCE_SAMPLE_RATE, config.sample_rate);
     device
         .build_output_stream(
             *config,
             move |data: &mut [T], _| {
                 let mut peak = 0.0_f32;
                 for frame in data.chunks_exact_mut(channels) {
-                    let stable = stability.read(&monitor_ring);
+                    let stable = resampler.read(&mut stability, &monitor_ring);
                     telemetry
                         .monitor_primed
                         .store(stable.primed, Ordering::Release);
@@ -975,12 +1196,24 @@ fn validate_db(label: &str, value: f32, minimum: f32, maximum: f32) -> Result<()
     Ok(())
 }
 
+fn validate_strength(label: &str, value: f32) -> Result<(), String> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(format!("{label} must be between 0% and 100%."));
+    }
+    Ok(())
+}
+
 fn db_to_linear(value: f32) -> f32 {
     10.0_f32.powf(value / 20.0)
 }
 
 struct InputProcessor {
     input_gain: f32,
+    noise_suppressor: NoiseSuppressor,
+    echo_canceller: EchoCanceller,
+    high_pass_enabled: bool,
+    highpass_previous_input: f32,
+    highpass_previous_output: f32,
     gate_threshold: f32,
     envelope_release: f32,
     gate_attack: f32,
@@ -994,6 +1227,14 @@ impl InputProcessor {
         let gate_enabled = settings.noise_gate_db > -80.0;
         Self {
             input_gain: db_to_linear(settings.input_gain_db),
+            noise_suppressor: NoiseSuppressor::new(
+                settings.noise_suppression_strength,
+                sample_rate,
+            ),
+            echo_canceller: EchoCanceller::new(settings.echo_control_strength),
+            high_pass_enabled: settings.high_pass_enabled,
+            highpass_previous_input: 0.0,
+            highpass_previous_output: 0.0,
             gate_threshold: if gate_enabled {
                 db_to_linear(settings.noise_gate_db)
             } else {
@@ -1007,9 +1248,24 @@ impl InputProcessor {
         }
     }
 
-    fn process(&mut self, sample: f32) -> f32 {
+    fn process(&mut self, sample: f32, echo_reference: f32) -> f32 {
         let amplified = sample * self.input_gain;
-        self.envelope = amplified
+        // w-okada's default RVC route leaves its high-pass filter disabled. Keep the
+        // compatibility path neutral unless the user explicitly enables rumble cleanup.
+        let highpassed = if self.high_pass_enabled {
+            // The fixed coefficient is a gentle ~30 Hz one-pole high-pass at the
+            // 48 kHz native contract.
+            let filtered =
+                amplified - self.highpass_previous_input + 0.995 * self.highpass_previous_output;
+            self.highpass_previous_input = amplified;
+            self.highpass_previous_output = filtered;
+            filtered
+        } else {
+            amplified
+        };
+        let echo_reduced = self.echo_canceller.process(highpassed, echo_reference);
+        let denoised = self.noise_suppressor.process(echo_reduced);
+        self.envelope = denoised
             .abs()
             .max(self.envelope + (0.0 - self.envelope) * self.envelope_release);
         let target = if self.gate_threshold == 0.0 || self.envelope >= self.gate_threshold {
@@ -1023,7 +1279,129 @@ impl InputProcessor {
             self.gate_release
         };
         self.gate_gain += (target - self.gate_gain) * coefficient;
-        amplified * self.gate_gain
+        (denoised * self.gate_gain).clamp(-1.0, 1.0)
+    }
+}
+
+/// A conservative, callback-safe downward expander. It tracks the quietest recent input
+/// instead of making a hard cut, which keeps breaths and consonants available to the pitch
+/// extractor while reducing stationary fan/room noise before RVC sees the signal.
+struct NoiseSuppressor {
+    strength: f32,
+    noise_floor: f32,
+    gain: f32,
+    floor_rise: f32,
+    floor_fall: f32,
+    gain_attack: f32,
+    gain_release: f32,
+}
+
+impl NoiseSuppressor {
+    fn new(strength: f32, sample_rate: u32) -> Self {
+        Self {
+            strength,
+            // A small but non-zero bootstrap floor lets the estimator learn common mic-room
+            // noise (roughly -42 dBFS) without treating the first speech sample as noise.
+            noise_floor: 0.008,
+            gain: 1.0,
+            floor_rise: smoothing_coefficient(sample_rate, 0.250),
+            floor_fall: smoothing_coefficient(sample_rate, 0.050),
+            gain_attack: smoothing_coefficient(sample_rate, 0.008),
+            gain_release: smoothing_coefficient(sample_rate, 0.045),
+        }
+    }
+
+    fn process(&mut self, sample: f32) -> f32 {
+        if self.strength <= 0.0 {
+            return sample;
+        }
+
+        let magnitude = sample.abs();
+        let tracking_ceiling = self.noise_floor * (2.25 + self.strength * 2.0) + 0.0005;
+        if magnitude <= tracking_ceiling {
+            let coefficient = if magnitude < self.noise_floor {
+                self.floor_fall
+            } else {
+                self.floor_rise
+            };
+            self.noise_floor += (magnitude - self.noise_floor) * coefficient;
+        }
+
+        let threshold = self.noise_floor * (2.0 + self.strength * 4.0) + 0.0004;
+        let target_gain = if magnitude < threshold {
+            let ratio = (magnitude / threshold.max(1e-5)).clamp(0.0, 1.0);
+            // At 100% strength, a sample at the adaptive floor is reduced to about 10%.
+            (1.0 - self.strength * (1.0 - ratio)).clamp(0.08, 1.0)
+        } else {
+            1.0
+        };
+        let coefficient = if target_gain > self.gain {
+            self.gain_attack
+        } else {
+            self.gain_release
+        };
+        self.gain += (target_gain - self.gain) * coefficient;
+        sample * self.gain
+    }
+}
+
+/// Lightweight NLMS echo control using the post-gain output callback as the far-end
+/// reference. It is intentionally conservative and bounded; a full acoustic echo canceller
+/// still needs device-specific delay calibration and room modelling.
+struct EchoCanceller {
+    strength: f32,
+    history: [f32; ECHO_HISTORY_FRAMES],
+    coefficients: [f32; ECHO_TAPS],
+    write_index: usize,
+}
+
+impl EchoCanceller {
+    fn new(strength: f32) -> Self {
+        Self {
+            strength,
+            history: [0.0; ECHO_HISTORY_FRAMES],
+            coefficients: [0.0; ECHO_TAPS],
+            write_index: 0,
+        }
+    }
+
+    fn process(&mut self, microphone: f32, reference: f32) -> f32 {
+        self.history[self.write_index] = reference;
+        let delayed_index =
+            (self.write_index + ECHO_HISTORY_FRAMES - ECHO_DELAY_FRAMES) % ECHO_HISTORY_FRAMES;
+        self.write_index = (self.write_index + 1) % ECHO_HISTORY_FRAMES;
+
+        if self.strength <= 0.0 {
+            return microphone;
+        }
+
+        let mut predicted = 0.0;
+        let mut energy = 1e-5;
+        for tap in 0..ECHO_TAPS {
+            let index = (delayed_index + ECHO_HISTORY_FRAMES - tap) % ECHO_HISTORY_FRAMES;
+            let reference_sample = self.history[index];
+            predicted += self.coefficients[tap] * reference_sample;
+            energy += reference_sample * reference_sample;
+        }
+
+        let error = microphone - predicted;
+        let adaptation = 0.08 / energy;
+        // Do not let an unexpectedly loud near-end voice train the filter aggressively.
+        let adaptation_scale = if microphone.abs() > predicted.abs() * 2.0 + 0.04 {
+            0.2
+        } else {
+            1.0
+        };
+        for tap in 0..ECHO_TAPS {
+            let index = (delayed_index + ECHO_HISTORY_FRAMES - tap) % ECHO_HISTORY_FRAMES;
+            self.coefficients[tap] = (self.coefficients[tap]
+                + adaptation * adaptation_scale * error * self.history[index])
+                .clamp(-2.0, 2.0);
+        }
+
+        let correction =
+            (predicted * self.strength).clamp(-(microphone.abs() + 0.25), microphone.abs() + 0.25);
+        microphone - correction
     }
 }
 
@@ -1053,24 +1431,97 @@ mod tests {
 
     #[test]
     fn audio_processing_settings_reject_invalid_ranges() {
-        assert!(AudioProcessingSettings::new(25.0, 0.0, -6.0, -60.0).is_err());
-        assert!(AudioProcessingSettings::new(0.0, 13.0, -6.0, -60.0).is_err());
-        assert!(AudioProcessingSettings::new(0.0, 0.0, 13.0, -60.0).is_err());
-        assert!(AudioProcessingSettings::new(0.0, 0.0, -6.0, -19.0).is_err());
-        assert!(AudioProcessingSettings::new(6.0, -3.0, -8.0, -55.0).is_ok());
+        assert!(AudioProcessingSettings::new(25.0, 0.0, -6.0, -60.0, 0.3, 0.0).is_err());
+        assert!(AudioProcessingSettings::new(0.0, 13.0, -6.0, -60.0, 0.3, 0.0).is_err());
+        assert!(AudioProcessingSettings::new(0.0, 0.0, 13.0, -60.0, 0.3, 0.0).is_err());
+        assert!(AudioProcessingSettings::new(0.0, 0.0, -6.0, -19.0, 0.3, 0.0).is_err());
+        assert!(AudioProcessingSettings::new(0.0, 0.0, -6.0, -80.0, 1.1, 0.0).is_err());
+        assert!(AudioProcessingSettings::new(0.0, 0.0, -6.0, -80.0, 0.0, -0.1).is_err());
+        assert!(AudioProcessingSettings::new(6.0, -3.0, -8.0, -55.0, 0.35, 0.5).is_ok());
     }
 
     #[test]
     fn noise_gate_at_minimum_is_transparent() {
         let mut processor = InputProcessor::new(AudioProcessingSettings::default(), 48_000);
-        assert!((processor.process(0.25) - 0.25).abs() < 1e-6);
+        assert!((processor.process(0.25, 0.0) - 0.25).abs() < 1e-6);
     }
 
     #[test]
     fn input_gain_is_applied_before_capture() {
-        let settings = AudioProcessingSettings::new(6.0, 0.0, -6.0, -80.0).unwrap();
+        let settings = AudioProcessingSettings::new(6.0, 0.0, -6.0, -80.0, 0.0, 0.0).unwrap();
         let mut processor = InputProcessor::new(settings, 48_000);
-        assert!((processor.process(0.25) - 0.4988).abs() < 0.002);
+        assert!((processor.process(0.25, 0.0) - 0.4988).abs() < 0.002);
+    }
+
+    #[test]
+    fn input_preprocessor_limits_gain_staging_to_float_audio_bounds() {
+        let settings = AudioProcessingSettings::new(24.0, 0.0, -6.0, -80.0, 0.0, 0.0).unwrap();
+        let mut processor = InputProcessor::new(settings, 48_000);
+        assert!(processor.process(1.0, 0.0).abs() <= 1.0);
+    }
+
+    #[test]
+    fn high_pass_is_opt_in_for_w_okada_compatible_defaults() {
+        let neutral = AudioProcessingSettings::default();
+        let mut neutral_processor = InputProcessor::new(neutral, 48_000);
+        let neutral_first = neutral_processor.process(0.25, 0.0);
+        let neutral_second = neutral_processor.process(0.25, 0.0);
+        assert!((neutral_first - 0.25).abs() < 1e-6);
+        assert!((neutral_second - 0.25).abs() < 1e-6);
+
+        let filtered = AudioProcessingSettings::default().with_high_pass(true);
+        let mut filtered_processor = InputProcessor::new(filtered, 48_000);
+        let filtered_first = filtered_processor.process(0.25, 0.0);
+        let filtered_second = filtered_processor.process(0.25, 0.0);
+        assert!((filtered_first - 0.25).abs() < 1e-6);
+        assert!(filtered_second < filtered_first);
+    }
+
+    #[test]
+    fn noise_suppression_reduces_stationary_noise_and_keeps_speech() {
+        let settings = AudioProcessingSettings::new(0.0, 0.0, -6.0, -80.0, 1.0, 0.0).unwrap();
+        let mut processor = InputProcessor::new(settings, 48_000);
+        let mut quiet = 0.0;
+        for _ in 0..48_000 {
+            quiet = processor.process(0.01, 0.0);
+        }
+        assert!(
+            quiet.abs() < 0.005,
+            "stationary noise was not reduced: {quiet}"
+        );
+
+        let mut speech = 0.0;
+        for frame in 0..2_000 {
+            speech = processor.process(if frame % 2 == 0 { 0.35 } else { -0.35 }, 0.0);
+        }
+        assert!(
+            speech.abs() > 0.2,
+            "speech transient was over-suppressed: {speech}"
+        );
+    }
+
+    #[test]
+    fn echo_control_learns_a_delayed_output_reference() {
+        let mut canceller = EchoCanceller::new(1.0);
+        let mut residual_sum = 0.0;
+        let mut source_sum = 0.0;
+        for frame in 0..96_000 {
+            let reference = (frame as f32 * 0.021).sin() * 0.12;
+            let microphone = if frame >= ECHO_DELAY_FRAMES {
+                ((frame - ECHO_DELAY_FRAMES) as f32 * 0.021).sin() * 0.12
+            } else {
+                0.0
+            };
+            let output = canceller.process(microphone, reference);
+            if frame > 48_000 {
+                residual_sum += output * output;
+                source_sum += microphone * microphone;
+            }
+        }
+        assert!(
+            residual_sum < source_sum * 0.35,
+            "echo residual remained too high"
+        );
     }
 
     #[test]
@@ -1131,5 +1582,20 @@ mod tests {
         assert!(low.repeated);
         assert_eq!(low.sample, 0.3);
         assert_eq!(ring.len(), 1);
+    }
+
+    #[test]
+    fn output_resampler_interpolates_between_fixed_rate_samples() {
+        let ring = ArrayQueue::new(RING_BUFFER_FRAMES);
+        for index in 0..(INITIAL_PRIME_FRAMES + 8) {
+            ring.push(index as f32).unwrap();
+        }
+        let mut playback = AdaptivePlayback::new(48_000);
+        let mut resampler = OutputResampler::new(48_000, 96_000);
+        let first = resampler.read(&mut playback, &ring);
+        let second = resampler.read(&mut playback, &ring);
+        assert!(first.primed && second.primed);
+        assert!((first.sample - 0.0).abs() < 1e-6);
+        assert!((second.sample - 0.5).abs() < 1e-6);
     }
 }
