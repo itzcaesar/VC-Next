@@ -5,18 +5,18 @@
   "identifier": "app.voicechangernext.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
-        "title": "VC Next — Feasibility Prototype",
-        "width": 1240,
-        "height": 780,
-        "minWidth": 1060,
-        "minHeight": 700
+        "title": "VC Next — Local Voice Studio",
+        "width": 1380,
+        "height": 860,
+        "minWidth": 1040,
+        "minHeight": 720
       }
     ],
     "security": {
