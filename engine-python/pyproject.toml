@@ -1,0 +1,18 @@
+[project]
+name = "vc-next-sidecar"
+version = "0.1.0"
+description = "Local RVC compatibility sidecar for VC Next"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+vc-next-sidecar = "vc_next_sidecar.__main__:main"
+vc-next-convert-offline = "vc_next_sidecar.offline_cli:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vc_next_sidecar*"]

@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import json
+import importlib.util
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+ENGINE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ENGINE_ROOT))
+
+from vc_next_sidecar.model_probe import inspect_model  # noqa: E402
+from vc_next_sidecar.checkpoint_probe import inspect_trusted_checkpoint, summarize_checkpoint  # noqa: E402
+from vc_next_sidecar.protocol import ProtocolError, handle_request  # noqa: E402
+
+
+class ProtocolTests(unittest.TestCase):
+    def test_handshake_is_versioned(self) -> None:
+        response = handle_request(
+            {
+                "protocolVersion": 1,
+                "requestId": "test",
+                "method": "handshake",
+                "params": {},
+            }
+        )
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["protocolVersion"], 1)
+        self.assertEqual(response["result"]["transport"], "stdio-json-lines")
+
+    def test_unknown_method_is_rejected(self) -> None:
+        with self.assertRaises(ProtocolError) as context:
+            handle_request(
+                {
+                    "protocolVersion": 1,
+                    "requestId": "test",
+                    "method": "unknown",
+                    "params": {},
+                }
+            )
+        self.assertEqual(context.exception.code, "unknown_method")
+
+    def test_once_process_returns_one_json_response(self) -> None:
+        request = json.dumps(
+            {
+                "protocolVersion": 1,
+                "requestId": "subprocess",
+                "method": "probe_runtime",
+                "params": {},
+            }
+        )
+        completed = subprocess.run(
+            [sys.executable, "-m", "vc_next_sidecar", "--once"],
+            cwd=ENGINE_ROOT,
+            input=request + "\n",
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        response = json.loads(completed.stdout)
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["requestId"], "subprocess")
+        self.assertIn("python", response["result"])
+
+
+class ModelInspectionTests(unittest.TestCase):
+    def test_checkpoint_is_inspected_without_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "voice.pth"
+            model.write_bytes(b"PK\x03\x04safe-test-placeholder")
+            result = inspect_model(str(model))
+        self.assertEqual(result["role"], "rvc-checkpoint")
+        self.assertFalse(result["checkpointLoaded"])
+        self.assertTrue(result["safeInspectionOnly"])
+
+    def test_unsupported_extension_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "voice.exe"
+            model.write_bytes(b"not a model")
+            with self.assertRaises(ValueError):
+                inspect_model(str(model))
+
+    def test_matching_sibling_index_is_recommended_first(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "mayaputri.pth"
+            unrelated = root / "added_IVF100_Flat_other_voice.index"
+            matching = root / "added_IVF892_Flat_nprobe_1_mayaputri_v2.index"
+            model.write_bytes(b"checkpoint")
+            unrelated.write_bytes(b"index")
+            matching.write_bytes(b"index")
+
+            result = inspect_model(str(model))
+
+        self.assertEqual(result["recommendedIndex"], str(matching.resolve()))
+        self.assertEqual(result["siblingIndexes"][0], str(matching.resolve()))
+        self.assertTrue(result["packageComplete"])
+
+    def test_checkpoint_without_index_remains_usable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "voice.pth"
+            model.write_bytes(b"checkpoint")
+            result = inspect_model(str(model))
+
+        self.assertIsNone(result["recommendedIndex"])
+        self.assertFalse(result["packageComplete"])
+        self.assertIn("can still run", result["pairingNote"])
+
+    def test_rvc_checkpoint_schema_is_summarized_without_model_code(self) -> None:
+        class FakeEmbedding:
+            shape = (3, 256)
+
+        result = summarize_checkpoint(
+            {
+                "config": [1, 2, 3, 40_000],
+                "weight": {"emb_g.weight": FakeEmbedding(), "decoder.weight": object()},
+                "version": "v2",
+                "f0": 1,
+            }
+        )
+        self.assertEqual(result["rvcVersion"], "v2")
+        self.assertEqual(result["targetSampleRate"], 40_000)
+        self.assertEqual(result["speakerCount"], 3)
+        self.assertEqual(result["weightKeyCount"], 2)
+
+    def test_invalid_rvc_checkpoint_schema_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            summarize_checkpoint({"config": [], "weight": {}})
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch is not installed")
+    def test_restricted_loader_reads_a_tensor_only_checkpoint(self) -> None:
+        import torch
+
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "voice.pth"
+            torch.save(
+                {
+                    "config": [1, 2, 3, 48_000],
+                    "weight": {"emb_g.weight": torch.zeros((2, 256))},
+                    "version": "v2",
+                    "f0": 1,
+                },
+                model,
+            )
+            result = inspect_trusted_checkpoint(str(model))
+
+        self.assertTrue(result["checkpointLoaded"])
+        self.assertFalse(result["safeInspectionOnly"])
+        self.assertEqual(result["loadPolicy"], "torch-weights-only")
+        self.assertEqual(result["targetSampleRate"], 48_000)
+        self.assertEqual(result["speakerCount"], 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

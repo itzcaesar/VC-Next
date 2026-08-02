@@ -1,0 +1,5 @@
+# Compatibility baseline chosen for the first Windows/NVIDIA RVC adapter.
+# Install PyTorch separately from its official CUDA wheel index (see README.md).
+numpy==1.26.4
+soundfile==0.12.1
+faiss-cpu==1.14.3
