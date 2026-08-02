@@ -268,6 +268,7 @@ class LiveRvcProcessor:
         )
         self.streaming_preset = profile.name
         self.chunk_frames = profile.chunk_frames
+        self.extra_frames = profile.extra_frames
         self.analysis_frames = profile.analysis_frames
         self.crossfade_frames = profile.crossfade_frames
         self.sola_search_frames = profile.sola_search_frames
@@ -321,8 +322,9 @@ class LiveRvcProcessor:
             "sampleRate": LIVE_INPUT_SAMPLE_RATE,
             "chunkFrames": self.chunk_frames,
             "chunkMilliseconds": self.chunk_frames * 1_000 / LIVE_INPUT_SAMPLE_RATE,
+            "extraFrames": self.extra_frames,
+            "extraMilliseconds": self.extra_frames * 1_000 / LIVE_INPUT_SAMPLE_RATE,
             "analysisFrames": self.analysis_frames,
-            "extraFrames": self.analysis_frames,
             "analysisMilliseconds": self.analysis_frames * 1_000 / LIVE_INPUT_SAMPLE_RATE,
             "crossfadeFrames": self.crossfade_frames,
             "crossfadeMilliseconds": self.crossfade_frames * 1_000 / LIVE_INPUT_SAMPLE_RATE,
@@ -398,7 +400,9 @@ class LiveRvcProcessor:
             chunk_frames=value_or_default(
                 "chunkFrames", package_defaults.get("chunkFrames")
             ),
-            extra_frames=params.get("extraFrames"),
+            extra_frames=value_or_default(
+                "extraFrames", package_defaults.get("extraFrames")
+            ),
         )
         try:
             speaker_id = int(params.get("speakerId", 0))
@@ -468,7 +472,7 @@ class LiveRvcProcessor:
         candidate._configure_stream(
             stream_profile.name,
             chunk_frames=stream_profile.chunk_frames,
-            extra_frames=params.get("extraFrames"),
+            extra_frames=stream_profile.extra_frames,
             rvc_version=loaded.rvc_version,
         )
         candidate.reset_stream()
@@ -538,11 +542,13 @@ class LiveRvcProcessor:
             or f0_threshold != self.f0_threshold
             or stream_profile.name != self.streaming_preset
             or stream_profile.chunk_frames != self.chunk_frames
+            or stream_profile.extra_frames != self.extra_frames
             or stream_profile.analysis_frames != self.analysis_frames
         )
         profile_changed = (
             stream_profile.name != self.streaming_preset
             or stream_profile.chunk_frames != self.chunk_frames
+            or stream_profile.extra_frames != self.extra_frames
             or stream_profile.analysis_frames != self.analysis_frames
         )
         self.pitch_shift = pitch_shift
@@ -554,7 +560,7 @@ class LiveRvcProcessor:
             self._configure_stream(
                 stream_profile.name,
                 chunk_frames=stream_profile.chunk_frames,
-                extra_frames=stream_profile.analysis_frames,
+                extra_frames=stream_profile.extra_frames,
                 rvc_version=getattr(self.generator, "rvc_version", None) if self.generator else None,
             )
         if changed:
@@ -568,6 +574,7 @@ class LiveRvcProcessor:
         previous = (
             self.streaming_preset,
             self.chunk_frames,
+            self.extra_frames,
             self.analysis_frames,
         )
         measurements: list[dict[str, Any]] = []
@@ -577,7 +584,7 @@ class LiveRvcProcessor:
                 self._configure_stream(
                     profile.name,
                     chunk_frames=profile.chunk_frames,
-                    extra_frames=profile.analysis_frames,
+                    extra_frames=profile.extra_frames,
                     rvc_version=getattr(self.generator, "rvc_version", None) if self.generator else None,
                 )
                 self.reset_stream()
@@ -609,6 +616,7 @@ class LiveRvcProcessor:
                     {
                         "preset": preset_name,
                         "chunkFrames": self.chunk_frames,
+                        "extraFrames": self.extra_frames,
                         "analysisFrames": self.analysis_frames,
                         # Keep processMs as the p95 value for compatibility
                         # with the existing UI/report shape; maxProcessMs
@@ -629,6 +637,7 @@ class LiveRvcProcessor:
                 previous[0],
                 chunk_frames=previous[1],
                 extra_frames=previous[2],
+                rvc_version=getattr(self.generator, "rvc_version", None) if self.generator else None,
             )
             self.reset_stream()
 
@@ -754,27 +763,30 @@ class LiveRvcProcessor:
         return (perf_counter() - started) * 1_000.0
 
     def _silence_front_audio_frames(self) -> int:
-        """Return the retained front context in live 48 kHz frames.
+        """Return the rounded retained front context in live 48 kHz frames.
 
-        The public Extra/context setting is the complete retained analysis
-        window.  The portion before the current SOLA candidate is therefore
-        the effective ``extraConvertSize`` passed to w-okada's RVC pipeline;
-        deriving it from the actual window keeps custom settings connected to
-        both pitch-front trimming and generator output length.
+        RVCr2 rounds ``convertSize`` to a complete 160-sample feature hop.
+        The retained live window is the equivalent 48 kHz duration, so this
+        value can differ from the user's Extra value by at most one rounded
+        feature step.  The unrounded value used by w-okada's front trim is
+        exposed by :meth:`_processing_extra_frames` below.
         """
 
         return max(0, self.analysis_frames - self.stitcher.candidate_frames)
 
-    def _silence_front_feature_frames(self) -> int:
+    def _processing_extra_frames(self) -> int:
+        """Return w-okada's Extra value after the 48 kHz → 16 kHz conversion."""
+
         return max(
             0,
-            int(
-                self._silence_front_audio_frames()
-                * FEATURE_SAMPLE_RATE
-                / LIVE_INPUT_SAMPLE_RATE
-            )
-            // 360,
+            (self.extra_frames * FEATURE_SAMPLE_RATE) // LIVE_INPUT_SAMPLE_RATE,
         )
+
+    def _silence_front_feature_frames(self) -> int:
+        # Pipeline.py uses ``floor(silence_front * 16000) // 360``.  Keeping
+        # the user's Extra value here (rather than the rounded retained window)
+        # preserves the exact retrieval-front boundary.
+        return self._processing_extra_frames() // 360
 
     def _generator_convert_length(self) -> int:
         """Return the output length requested from the RVC generator.
@@ -794,9 +806,7 @@ class LiveRvcProcessor:
         processing_chunk = (self.chunk_frames * FEATURE_SAMPLE_RATE) // LIVE_INPUT_SAMPLE_RATE
         processing_crossfade = (self.crossfade_frames * FEATURE_SAMPLE_RATE) // LIVE_INPUT_SAMPLE_RATE
         processing_search = (self.sola_search_frames * FEATURE_SAMPLE_RATE) // LIVE_INPUT_SAMPLE_RATE
-        processing_extra = (
-            self._silence_front_audio_frames() * FEATURE_SAMPLE_RATE
-        ) // LIVE_INPUT_SAMPLE_RATE
+        processing_extra = self._processing_extra_frames()
         convert_size = int(
             np.ceil(
                 (processing_chunk + processing_crossfade + processing_search + processing_extra)
@@ -877,9 +887,7 @@ class LiveRvcProcessor:
         # restores zero F0 frames at the front of the pitch buffer.  Keep that
         # boundary explicit so pitch decisions do not depend on synthetic
         # padding.
-        pitch_front_16k = (
-            self._silence_front_audio_frames() * FEATURE_SAMPLE_RATE
-        ) // LIVE_INPUT_SAMPLE_RATE
+        pitch_front_16k = self._processing_extra_frames()
         pitchf = self.features.extract_pitch(
             waveform,
             self.f0_threshold,

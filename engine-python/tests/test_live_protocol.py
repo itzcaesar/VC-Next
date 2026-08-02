@@ -202,19 +202,43 @@ class AssetDiscoveryTests(unittest.TestCase):
             STREAM_PROFILES["balanced"].chunk_frames,
         )
         self.assertGreater(
-            STREAM_PROFILES["quality"].analysis_frames,
-            STREAM_PROFILES["balanced"].analysis_frames,
+            STREAM_PROFILES["quality"].extra_frames,
+            STREAM_PROFILES["balanced"].extra_frames,
         )
         for profile in STREAM_PROFILES.values():
             self.assertEqual(profile.chunk_frames % 480, 0)
+            resolved = get_stream_profile(profile.name, rvc_version="v2")
             self.assertLess(
-                profile.chunk_frames
-                + profile.crossfade_frames
-                + profile.sola_search_frames,
-                profile.analysis_frames,
+                resolved.chunk_frames
+                + resolved.crossfade_frames
+                + resolved.sola_search_frames,
+                resolved.analysis_frames,
             )
         with self.assertRaises(ValueError):
             get_stream_profile("turbo")
+
+    def test_v2_extra_context_matches_wokada_convert_size_geometry(self) -> None:
+        from vc_next_sidecar.stream_config import get_stream_profile
+
+        # w-okada converts the 48 kHz device values to 16 kHz, rounds the
+        # complete convertSize to a 160-sample v2 boundary, then maps the
+        # retained window back to the live 48 kHz stream.
+        package = get_stream_profile(
+            "balanced",
+            chunk_frames=24_000,
+            extra_frames=24_000,
+            rvc_version="v2",
+        )
+        screenshot = get_stream_profile(
+            "balanced",
+            chunk_frames=24_000,
+            extra_frames=65_280,
+            rvc_version="v2",
+        )
+        self.assertEqual(package.extra_frames, 24_000)
+        self.assertEqual(package.analysis_frames, 52_800)
+        self.assertEqual(screenshot.extra_frames, 65_280)
+        self.assertEqual(screenshot.analysis_frames, 94_080)
 
     def test_calibration_discards_profile_switch_warmup_and_restores_shape(self) -> None:
         from vc_next_sidecar.live_worker import LiveRvcProcessor
@@ -254,14 +278,15 @@ class AssetDiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(w_okada_shape.crossfade_frames, 4_096)
         self.assertEqual(w_okada_shape.sola_search_frames, 576)
-        self.assertEqual(w_okada_shape.analysis_frames, 32_768)
+        self.assertEqual(w_okada_shape.extra_frames, 24_000)
+        self.assertEqual(w_okada_shape.analysis_frames, 52_736)
 
         v2_shape = get_stream_profile(
             "balanced", chunk_frames=24_000, extra_frames=24_000, rvc_version="v2"
         )
         # RVCr2 converts this 48 kHz window at 16 kHz, rounds convertSize to a
-        # 160-sample feature hop, then returns to the device rate: 33,120 frames.
-        self.assertEqual(v2_shape.analysis_frames, 33_120)
+        # 160-sample feature hop, then returns to the device rate: 52,800 frames.
+        self.assertEqual(v2_shape.analysis_frames, 52_800)
         self.assertEqual(v2_shape.analysis_frames % 480, 0)
 
         profile = get_stream_profile(

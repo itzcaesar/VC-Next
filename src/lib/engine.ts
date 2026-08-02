@@ -225,6 +225,7 @@ export interface LiveRvcStatus {
   analysisFrames: number;
   analysisMilliseconds: number;
   extraFrames?: number;
+  extraMilliseconds?: number;
   crossfadeFrames: number;
   crossfadeMilliseconds: number;
   solaSearchFrames: number;
@@ -276,6 +277,7 @@ export interface LiveRvcStatus {
 export interface LiveCalibrationMeasurement {
   preset: ConversionMode;
   chunkFrames: number;
+  extraFrames?: number;
   analysisFrames: number;
   processMs: number;
   maxProcessMs?: number;
@@ -379,6 +381,7 @@ export const EMPTY_LIVE_RVC_STATUS: LiveRvcStatus = {
   analysisFrames: 24_000,
   analysisMilliseconds: 500,
   extraFrames: 24_000,
+  extraMilliseconds: 500,
   crossfadeFrames: 4_096,
   crossfadeMilliseconds: 4096 / 48,
   solaSearchFrames: 576,

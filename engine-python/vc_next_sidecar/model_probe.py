@@ -70,6 +70,21 @@ def _chunk_frames_from_seconds(value: Any) -> int | None:
     return max(480, min(480_000, frames))
 
 
+def _frame_count(value: Any) -> int | None:
+    """Normalize a w-okada-style frame setting without trusting metadata."""
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or not numeric.is_integer():
+        return None
+    frames = int(numeric)
+    if not 480 <= frames <= 480_000:
+        return None
+    return frames
+
+
 def model_package_defaults(model_path: str | Path) -> dict[str, Any]:
     """Return safe, normalized settings from a w-okada-style params.json."""
 
@@ -80,6 +95,12 @@ def model_package_defaults(model_path: str | Path) -> dict[str, Any]:
     index_ratio = _bounded_float(params.get("index_ratio", params.get("indexRatio")), 0.0, 1.0)
     protect = _bounded_float(params.get("protect_ratio", params.get("protectRatio")), 0.0, 0.5)
     chunk_frames = _chunk_frames_from_seconds(params.get("chunk_sec", params.get("chunkSeconds")))
+    extra_frames = _frame_count(
+        params.get(
+            "extra_convert_size",
+            params.get("extraConvertSize", params.get("extraFrames")),
+        )
+    )
     embedder = params.get("embedder")
     pitch_estimator = params.get("pitch_estimator", params.get("pitchEstimator"))
     if pitch is not None:
@@ -90,6 +111,8 @@ def model_package_defaults(model_path: str | Path) -> dict[str, Any]:
         defaults["protectRatio"] = protect
     if chunk_frames is not None:
         defaults["chunkFrames"] = chunk_frames
+    if extra_frames is not None:
+        defaults["extraFrames"] = extra_frames
     if isinstance(embedder, str) and embedder.strip():
         defaults["embedder"] = embedder.strip()
     if isinstance(pitch_estimator, str) and pitch_estimator.strip():

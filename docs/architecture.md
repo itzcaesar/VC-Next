@@ -258,7 +258,10 @@ Model settings are keyed locally by model path. The settings contract includes:
 - named streaming preset;
 - explicit Chunk and Extra/context frames.
 
-Changing Quality, Balanced, or Low latency updates the preset geometry. Advanced Chunk/Extra selectors can then override the hop and analysis context. Python clamps the analysis window to a stitch-safe minimum.
+Changing Quality, Balanced, or Low latency updates the preset geometry. Advanced
+Chunk/Extra selectors can then override the hop and w-okada-compatible front
+context. Python derives and reports the effective analysis window after
+crossfade/search and model-rate rounding.
 
 ## Security and privacy boundary
 

@@ -85,7 +85,7 @@ def main() -> int:
     parser.add_argument(
         "--extra-frames",
         type=int,
-        help="Optional custom analysis/context window for --chunk-frames.",
+        help="Optional w-okada extraConvertSize/front context for --chunk-frames.",
     )
     parser.add_argument("--status-interval", type=float, default=30.0)
     parser.add_argument(

@@ -287,13 +287,19 @@ An index ratio above zero is rejected when no valid index is loaded.
 
 Named defaults are defined at 48 kHz:
 
-| Preset | Chunk/hop | Analysis | Crossfade | SOLA search |
+| Preset | Chunk/hop | Extra/front context | Crossfade | SOLA search |
 | --- | ---: | ---: | ---: | ---: |
 | Low latency | 7,680 frames / 160 ms | 19,200 / 400 ms | 4,096 / 85.3 ms | 480 / 10 ms |
 | Balanced | 9,600 / 200 ms | 24,000 / 500 ms | 4,096 / 85.3 ms | 576 / 12 ms |
 | Quality | 12,000 / 250 ms | 28,800 / 600 ms | 4,096 / 85.3 ms | 720 / 15 ms |
 
-The UI can provide explicit Chunk and Extra/context values. The worker validates them between 480 and 480,000 frames, scales overlap/search when necessary, reserves the w-okada-compatible 4,096-sample front context, rounds the effective window to a 128-sample boundary, and increases it if the requested value is too short for a complete SOLA candidate.
+The UI can provide explicit Chunk and Extra/context values. The worker validates
+them between 480 and 480,000 frames, scales overlap/search when necessary, and
+derives the retained analysis window from the same `convertSize` equation as
+w-okada. RVC v1 rounds the device-rate window to 128 samples; RVC v2 first
+converts Chunk, overlap, search, and Extra to 16 kHz, rounds to a 160-sample
+feature hop, and maps the result back to 48 kHz. The derived window is always
+large enough for a complete SOLA candidate.
 
 ## Settings contract
 
@@ -308,7 +314,7 @@ The load/settings contract currently supports:
 | `f0Threshold` | 0.01–0.99 (default 0.30) |
 | `streamingPreset` | `quality`, `balanced`, or `latency` |
 | `chunkFrames` | bounded whole-number frame count |
-| `extraFrames` | bounded whole-number context; stitch-safe minimum enforced |
+| `extraFrames` | bounded whole-number w-okada `extraConvertSize`; derived analysis window reported separately |
 
 Changing settings resets streaming history to prevent old pitch, retrieval, or geometry state from leaking into the next session.
 

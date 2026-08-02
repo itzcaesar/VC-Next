@@ -327,10 +327,10 @@ pending for converted-speech acceptance; a non-zero worker or fixture result
 must not be mistaken for end-to-end device loopback proof.
 
 After the w-okada parity pass, the real-model Balanced worker reports
-`f0Threshold: 0.30`, `silenceFrontFrames: 9,728`, and
-`generatorConvertFrames: 14,274`; the larger front value is the effective
-context derived from the selected 24,000-frame analysis window, so RMVPE and
-generator tail alignment follow the actual Chunk/Extra choice. Final
+`f0Threshold: 0.30`, an explicit `extraFrames` value, and a rounded
+`analysisFrames` value. `silenceFrontFeatureFrames` is calculated from the
+unrounded `extraConvertSize` exactly as in w-okada, while the retained live
+window includes the 16 kHz/160-sample rounding step. Final
 converted-speech certification still requires a working physical or virtual
 input loopback and a blind recording comparison against w-okada.
 

@@ -8,27 +8,68 @@ import math
 class StreamProfile:
     name: str
     chunk_frames: int
+    extra_frames: int
     analysis_frames: int
     crossfade_frames: int
     sola_search_frames: int
 
 
 STREAM_PROFILES = {
-    # w-okada's VoiceChangerV2 defaults to a 4096-sample SOLA overlap. Keep
-    # that overlap for normal RVC compatibility profiles; custom very small
-    # hops are reduced below so the overlap never consumes the whole hop.
-    "quality": StreamProfile("quality", 12_000, 28_800, 4_096, 720),
-    "balanced": StreamProfile("balanced", 9_600, 24_000, 4_096, 576),
-    "latency": StreamProfile("latency", 7_680, 19_200, 4_096, 480),
+    # The public Extra value is w-okada's ``extraConvertSize`` at the 48 kHz
+    # device boundary.  ``analysis_frames`` is derived below from Chunk,
+    # Extra, overlap and SOLA search; it is not a second user setting.
+    "quality": StreamProfile("quality", 12_000, 28_800, 45_696, 4_096, 720),
+    "balanced": StreamProfile("balanced", 9_600, 24_000, 38_272, 4_096, 576),
+    "latency": StreamProfile("latency", 7_680, 19_200, 31_488, 4_096, 480),
 }
 
 
 MIN_STREAM_FRAMES = 480
 MAX_STREAM_FRAMES = 480_000
-# w-okada's RVCSettings uses 4,096 samples of extra conversion context.  Keep
-# this as the minimum front context even when a caller only specifies Chunk;
-# the public Extra/context value can request a larger retained window.
+# w-okada's RVCSettings uses 4,096 samples of extra conversion context. Keep
+# it available as the documented compatibility default and as a useful option
+# for callers that want the smallest front context.
 DEFAULT_EXTRA_CONTEXT_FRAMES = 4_096
+
+
+def _analysis_frames(
+    *,
+    chunk: int,
+    extra: int,
+    crossfade: int,
+    search: int,
+    rvc_version: str | None,
+) -> int:
+    """Derive the retained live window from w-okada's convertSize formula."""
+
+    version = str(rvc_version or "").casefold()
+    if version == "v2":
+        processing_chunk = (chunk * 16_000) // 48_000
+        processing_crossfade = (crossfade * 16_000) // 48_000
+        processing_search = (search * 16_000) // 48_000
+        processing_extra = (extra * 16_000) // 48_000
+        convert_size = int(
+            math.ceil(
+                (processing_chunk + processing_crossfade + processing_search + processing_extra)
+                / 160.0
+            )
+            * 160
+        )
+        # The native live history is maintained at 48 kHz.  RVCr2's 160-sample
+        # feature hop therefore maps back to an exact 480-device-frame step.
+        return max(chunk + crossfade + search, convert_size * 48_000 // 16_000)
+
+    # RVC v1 runs in the device/model sample-rate domain and uses the model's
+    # 128-sample generator boundary for the retained input window.
+    return max(
+        chunk + crossfade + search,
+        int(
+            math.ceil(
+                (chunk + crossfade + search + extra) / 128.0
+            )
+            * 128
+        ),
+    )
 
 
 def _validate_stream_frames(value: object, label: str) -> int:
@@ -61,57 +102,31 @@ def get_stream_profile(
             f"Unsupported streaming preset {name!r}; expected quality, balanced, or latency."
         ) from error
 
-    if chunk_frames is None and extra_frames is None:
-        return profile
-
     chunk = _validate_stream_frames(
         profile.chunk_frames if chunk_frames is None else chunk_frames,
         "Chunk",
     )
     requested_extra = _validate_stream_frames(
-        profile.analysis_frames if extra_frames is None else extra_frames,
+        profile.extra_frames if extra_frames is None else extra_frames,
         "Extra/context",
     )
     # Keep overlap and SOLA search proportional to the selected hop. The
-    # analysis window is never allowed to be shorter than the complete stitch
-    # candidate, which prevents invalid boundaries and click-producing output.
+    # The analysis window is never allowed to be shorter than the complete
+    # stitch candidate, which prevents invalid boundaries and click-producing
+    # output.
     crossfade = min(profile.crossfade_frames, max(2, chunk // 2), chunk - 1)
     search = min(profile.sola_search_frames, max(0, chunk // 8))
-    # RVC v1 works in the live 48 kHz domain and rounds its input window to a
-    # 128-sample generator boundary. RVC v2 (RVCr2 in w-okada) first resamples
-    # the live hop to 16 kHz, rounds ``convertSize`` to a 160-sample HuBERT
-    # hop, and converts that window back to the device rate. Keeping the two
-    # geometries explicit avoids a small but audible feature-window shift on
-    # v2 voices while preserving the historical shape for unknown/unloaded
-    # models.
-    if str(rvc_version or "").casefold() == "v2":
-        processing_chunk = (chunk * 16_000) // 48_000
-        processing_crossfade = (crossfade * 16_000) // 48_000
-        processing_search = (search * 16_000) // 48_000
-        processing_extra = (DEFAULT_EXTRA_CONTEXT_FRAMES * 16_000) // 48_000
-        convert_size = (
-            processing_chunk
-            + processing_crossfade
-            + processing_search
-            + processing_extra
-        )
-        convert_size = int(math.ceil(convert_size / 160.0) * 160)
-        v2_analysis = int(math.ceil(convert_size * 48_000 / 16_000))
-        analysis = max(requested_extra, v2_analysis)
-        analysis = int(math.ceil(analysis / 480.0) * 480)
-    else:
-        # RVC's live generator truncates feature/output hops on 128-sample
-        # boundaries. Round the retained window up before it reaches the
-        # model so custom Chunk/Extra values follow the same geometry as
-        # w-okada's v1-compatible path.
-        analysis = max(
-            requested_extra,
-            chunk + crossfade + search + DEFAULT_EXTRA_CONTEXT_FRAMES,
-        )
-        analysis = int(math.ceil(analysis / 128.0) * 128)
+    analysis = _analysis_frames(
+        chunk=chunk,
+        extra=requested_extra,
+        crossfade=crossfade,
+        search=search,
+        rvc_version=rvc_version,
+    )
     return replace(
         profile,
         chunk_frames=chunk,
+        extra_frames=requested_extra,
         analysis_frames=analysis,
         crossfade_frames=crossfade,
         sola_search_frames=search,

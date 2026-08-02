@@ -263,7 +263,7 @@ While audio is running, VC Next checks the selected endpoints periodically. If W
 | RMVPE threshold | 0.01–0.99 (default 0.30) | Adjusts voiced/unvoiced pitch detection; 0.30 matches w-okada's RMVPE ONNX default |
 | Speaker | Model-defined | Selects a speaker embedding in multi-speaker checkpoints |
 | Chunk | 3,072–52,800 frames in the UI | Controls how often the live model receives a new hop |
-| Extra/context | 3,840–480,000 frames in the UI | Controls retained analysis context; safety minimums are enforced |
+| Extra/context | 3,840–480,000 frames in the UI | Controls w-okada's front `extraConvertSize`; the effective analysis window is derived from Chunk + Extra + stitching geometry |
 
 Smaller chunks reduce response time but leave less inference headroom and may weaken pitch stability or chunk stitching. Larger context can improve continuity at the cost of latency and compute.
 
@@ -277,8 +277,8 @@ cargo test --manifest-path src-tauri\Cargo.toml
 .\engine-python\.venv\Scripts\python.exe -m unittest discover -s engine-python\tests -p "test_*.py" -v
 ```
 
-The current working tree passes 32 Rust library tests, 29 native-route tests,
-62 Python tests, and the TypeScript/Vite production build. The runtime probe
+The current working tree passes 33 Rust library tests, 30 native-route tests,
+71 Python tests, and the TypeScript/Vite production build. The runtime probe
 checks PyTorch CUDA and the ONNX Runtime CUDA provider before reporting RVC
 readiness, while the desktop diagnostics use a native NVIDIA/Windows GPU probe
 instead of assuming the development machine. A native Tauri bundle still
@@ -431,17 +431,19 @@ w-okada-compatible fidelity. Add `-HighPass` to exercise the optional rumble
 filter; the report records both the requested and active setting.
 
 The diagnostic defaults to the package-compatible `Pitch +14`, `Index 0.30`,
-`Protect 0.50`, `Chunk 24,000`, and the effective v2 analysis window of
-`33,120` frames used by the current reference voice (24,000 hop + 4,096
-overlap + 576 search + w-okada's 16 kHz/160-sample conversion rounding).
-Override those values when validating a different package.
+`Protect 0.50`, `Chunk 24,000`, and `Extra 24,000`. For an RVC v2 voice this
+produces an effective `52,800`-frame analysis window after w-okada's 16 kHz /
+160-sample `convertSize` rounding (24,000 hop + 4,096 overlap + 576 search +
+24,000 front Extra, rounded at 16 kHz). Override those values when validating
+a different package; the screenshot-compatible `Extra 65,280` option is also
+available.
 For an idle source, a healthy run reports `maxOutputPeak: 0`,
 `silenceSuppressedCalls > 0`, no missed deadlines, and no output underruns. A
 real speech route should be evaluated separately with a recorded source and a
 controlled loopback; idle silence passing does not prove perceptual quality
 parity with w-okada.
 
-On the RTX 4050 reference system, an earlier Balanced run showed occasional scheduler spikes during extended testing. After the live-worker parity and startup changes, the current 9,600-frame / 24,000-frame (200/500 ms) Balanced pair completed 600 realtime calls over 120 seconds with finite output and zero deadline misses (P50 91.2 ms, P95 105.9 ms, max 154.4 ms). The Quality 12,000-frame / 28,800-frame (250/600 ms) profile remains available when a larger safety margin is preferred. These are worker measurements; they do not replace a physical converted-speech loopback or a two-hour native-route soak.
+On the RTX 4050 reference system, an earlier Balanced run showed occasional scheduler spikes during extended testing. After the live-worker parity and startup changes, the current 9,600-frame hop / 24,000-frame Extra (200/500 ms) Balanced pair completed 600 realtime calls over 120 seconds with finite output and zero deadline misses (P50 91.2 ms, P95 105.9 ms, max 154.4 ms). For a v2 model, that pair derives a 38,400-frame effective analysis window; a package override of Chunk 24,000 + Extra 24,000 derives 52,800 frames. The Quality 12,000-frame / 28,800-frame Extra (250/600 ms) profile remains available when a larger safety margin is preferred. These are worker measurements; they do not replace a physical converted-speech loopback or a two-hour native-route soak.
 
 ### Operational recovery checklist
 

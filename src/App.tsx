@@ -51,10 +51,10 @@ const modeDescriptions: Record<ConversionMode, string> = {
   latency: "Smaller buffers for the quickest response.",
 };
 
-const streamProfiles: Record<ConversionMode, { hop: number; analysis: number; overlap: number; search: number }> = {
-  quality: { hop: 250, analysis: 600, overlap: 50, search: 15 },
-  balanced: { hop: 200, analysis: 500, overlap: 40, search: 12 },
-  latency: { hop: 160, analysis: 400, overlap: 30, search: 10 },
+const streamProfiles: Record<ConversionMode, { hop: number; extra: number; overlap: number; search: number }> = {
+  quality: { hop: 250, extra: 600, overlap: 50, search: 15 },
+  balanced: { hop: 200, extra: 500, overlap: 40, search: 12 },
+  latency: { hop: 160, extra: 400, overlap: 30, search: 10 },
 };
 
 type ModelPackageBusy = "checkpoint" | "folder" | "index" | "embedder" | "cover" | "adding" | null;
@@ -116,7 +116,7 @@ const CHUNK_OPTIONS = [
 ];
 
 const EXTRA_OPTIONS = [
-  3_840, 7_680, 16_320, 24_000, 25_920, 32_640, 65_280, 131_040, 144_000,
+  3_840, 4_096, 7_680, 16_320, 24_000, 25_920, 32_640, 65_280, 131_040, 144_000,
   192_000, 240_000, 288_000, 336_000, 384_000, 432_000, 480_000,
 ];
 
@@ -382,6 +382,7 @@ function isStoredCalibrationResult(value: unknown): value is LiveCalibrationResu
     const item = profile as Record<string, unknown>;
     return ["quality", "balanced", "latency"].includes(String(item.preset))
       && ["chunkFrames", "analysisFrames", "processMs", "deadlineMs", "headroomMs"].every((key) => typeof item[key] === "number")
+      && (item.extraFrames === undefined || typeof item.extraFrames === "number")
       && typeof item.stable === "boolean";
   });
 }
@@ -919,7 +920,7 @@ function App() {
   const streamProfile = {
     ...presetProfile,
     hop: selectedSettings.chunkFrames / 48,
-    analysis: selectedSettings.extraFrames / 48,
+    extra: selectedSettings.extraFrames / 48,
   };
   const pitch = selectedSettings.pitchShift;
   const indexRate = Math.round(selectedSettings.indexRatio * 100);
@@ -1750,7 +1751,7 @@ function App() {
     updateSelectedSettings({
       streamingPreset: preset,
       chunkFrames: measurement.chunkFrames,
-      extraFrames: measurement.analysisFrames,
+      extraFrames: measurement.extraFrames ?? measurement.analysisFrames,
     });
     setNotice(`${modeLabels[preset]} stream settings applied`);
   }
@@ -2256,7 +2257,7 @@ function App() {
               <div><h2>Processing mode</h2><p>{modeDescriptions[mode]}</p></div>
               <div className="mode-switch" role="group" aria-label="Processing mode">
                 {(Object.keys(modeLabels) as ConversionMode[]).map((key) => (
-                  <button key={key} className={mode === key ? "active" : ""} aria-pressed={mode === key} disabled={running} onClick={() => updateSelectedSettings({ streamingPreset: key, chunkFrames: streamProfiles[key].hop * 48, extraFrames: streamProfiles[key].analysis * 48 })}>{modeLabels[key]}</button>
+                  <button key={key} className={mode === key ? "active" : ""} aria-pressed={mode === key} disabled={running} onClick={() => updateSelectedSettings({ streamingPreset: key, chunkFrames: streamProfiles[key].hop * 48, extraFrames: streamProfiles[key].extra * 48 })}>{modeLabels[key]}</button>
                 ))}
               </div>
               <button className="secondary-button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((value) => !value)}>{advancedOpen ? "Hide advanced" : "Advanced settings"}</button>
@@ -2270,7 +2271,8 @@ function App() {
                   <label className="advanced-select"><span>Chunk / streaming hop</span><select aria-label="Chunk size" value={selectedSettings.chunkFrames} disabled={running} onChange={(event) => updateSelectedSettings({ chunkFrames: Number(event.target.value) })}>{CHUNK_OPTIONS.map((frames) => <option key={frames} value={frames}>{frameDurationLabel(frames)}</option>)}</select></label>
                   <label className="advanced-select"><span>Extra / context</span><select aria-label="Extra context" value={selectedSettings.extraFrames} disabled={running} onChange={(event) => updateSelectedSettings({ extraFrames: Number(event.target.value) })}>{EXTRA_OPTIONS.map((frames) => <option key={frames} value={frames}>{frameDurationLabel(frames)}</option>)}</select></label>
                    <div><span>Streaming hop</span><strong>{Number(streamProfile.hop.toFixed(1))} ms · {modeLabels[mode]}</strong></div>
-                   <div><span>Analysis window</span><strong>{Number(streamProfile.analysis.toFixed(1))} ms selected</strong></div>
+                   <div><span>Extra context</span><strong>{Number(streamProfile.extra.toFixed(1))} ms selected</strong></div>
+                   <div><span>Effective analysis</span><strong>{liveRvcStatus.state === "ready" ? `${liveRvcStatus.analysisMilliseconds.toFixed(1)} ms after RVC rounding` : "Computed when loaded"}</strong></div>
                    <div><span>SOLA overlap</span><strong>{streamProfile.overlap} ms + {streamProfile.search} ms search</strong></div>
                    <div className="calibration-action"><div><span>Hardware calibration</span><small>Measures each profile on the loaded voice before audio starts.</small></div><button type="button" className="details-toggle" onClick={calibrateSelectedModel} disabled={calibrationBusy || running || !selectedModelLoaded || selectedModelNeedsReload}>{calibrationBusy ? "Measuring…" : "Run calibration"}</button></div>
                    {calibrationResult && <div className="calibration-result" role="status"><strong>{calibrationResult.message}</strong>{calibrationResult.profiles.map((measurement) => <div key={measurement.preset}><span>{modeLabels[measurement.preset]} · P95 {measurement.processMs.toFixed(1)} ms / {measurement.deadlineMs.toFixed(1)} ms{measurement.maxProcessMs === undefined ? "" : ` · max ${measurement.maxProcessMs.toFixed(1)}`}</span><button type="button" className={measurement.preset === calibrationResult.recommendedPreset ? "recommended" : ""} onClick={() => applyCalibration(measurement.preset)}>{measurement.preset === calibrationResult.recommendedPreset ? "Recommended · Apply" : "Apply"}</button></div>)}</div>}

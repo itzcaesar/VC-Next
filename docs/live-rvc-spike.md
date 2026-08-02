@@ -106,7 +106,7 @@ All expensive model/session construction occurs during load. Per-hop work reuses
 
 ## Named streaming profiles
 
-| Preset | Chunk/hop | Analysis context | Crossfade | SOLA search |
+| Preset | Chunk/hop | Extra/front context | Crossfade | SOLA search |
 | --- | ---: | ---: | ---: | ---: |
 | Low latency | 7,680 frames / 160 ms | 19,200 / 400 ms | 4,096 / 85.3 ms | 480 / 10 ms |
 | Balanced | 9,600 / 200 ms | 24,000 / 500 ms | 4,096 / 85.3 ms | 576 / 12 ms |
@@ -118,7 +118,7 @@ Hardware calibration runs three steady-state requests for each named profile aft
 
 ## Custom Chunk and Extra
 
-**Chunk** is the number of new 48 kHz samples collected before a model request. **Extra/context** is the retained analysis window used to provide past speech context. The worker also reserves at least 4,096 front-context samples for w-okada-compatible RVC generation. V1 windows are rounded to a 128-sample boundary; v2 windows follow RVCr2's 16 kHz/160-sample conversion geometry and are rounded to the equivalent 480-frame boundary at 48 kHz.
+**Chunk** is the number of new 48 kHz samples collected before a model request. **Extra/context** is w-okada's `extraConvertSize`: front samples retained before the current output candidate. The effective analysis window is derived as `Chunk + crossfade + SOLA search + Extra`, then rounded to the model's generator boundary. V1 windows are rounded to a 128-sample boundary; v2 windows follow RVCr2's 16 kHz/160-sample conversion geometry and are rounded to the equivalent 480-frame boundary at 48 kHz.
 
 The UI currently exposes Chunk values from 3,072 frames (64 ms) through 52,800 frames (1.1 s), including common w-okada-compatible choices such as 12,288 and 49,152. Extra choices range from 3,840 frames (80 ms) through 480,000 frames (10 s).
 
@@ -186,7 +186,7 @@ An index ratio above zero without a loaded index is rejected with an actionable 
 | RMVPE threshold | 0.01–0.99 (default 0.30) | Controls voiced/unvoiced detection; the default matches w-okada's RMVPE ONNX extractor |
 | Preset | Quality/Balanced/Low latency | Updates default geometry |
 | Chunk | Explicit frame choice | Changes request/output hop |
-| Extra/context | Explicit frame choice | Changes retained analysis history |
+| Extra/context | Explicit frame choice | Changes w-okada-compatible front context and the derived analysis history |
 
 Settings are persisted locally by model path. Imported library entries and the last selected voice are also restored locally; renaming or removing an entry never renames or deletes the source files.
 

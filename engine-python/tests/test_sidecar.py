@@ -172,6 +172,7 @@ class ModelInspectionTests(unittest.TestCase):
                         "index_ratio": 0.3,
                         "protect_ratio": 0.5,
                         "chunk_sec": 0.5,
+                        "extraConvertSize": 65280,
                         "embedder": "hubert_base_l12",
                         "pitch_estimator": "rmvpe_onnx",
                     }
@@ -185,6 +186,7 @@ class ModelInspectionTests(unittest.TestCase):
         self.assertEqual(result["modelDefaults"]["indexRatio"], 0.3)
         self.assertEqual(result["modelDefaults"]["protectRatio"], 0.5)
         self.assertEqual(result["modelDefaults"]["chunkFrames"], 24_000)
+        self.assertEqual(result["modelDefaults"]["extraFrames"], 65_280)
         self.assertEqual(defaults["embedder"], "hubert_base_l12")
 
     def test_invalid_or_oversized_params_do_not_block_inspection(self) -> None:

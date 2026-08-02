@@ -27,7 +27,7 @@ rules and test evidence below belong to VC Next.
 | Live input | 48 kHz device audio | 48 kHz native audio engine |
 | Feature-rate audio | Per-hop `resampy` `kaiser_fast` to 16 kHz | Same filter and per-hop v2 feature history |
 | RVC v2 hop | 160 samples at 16 kHz | Same rounded `convertSize` geometry |
-| Extra/context | Front context before the current output candidate | Effective front context is derived from the selected retained analysis window |
+| Extra/context | `extraConvertSize` front context before the current output candidate | Same explicit front context; effective retained window is derived from `convertSize` rounding |
 | Content features | ContentVec, then 2× interpolation | Same |
 | RMVPE front context | Analyze the post-front tail; restore zero F0 frames | Same trim-and-restore boundary |
 | Retrieval | FAISS nearest vector, `k=1` | Same; index dimension is validated before load |
