@@ -146,6 +146,12 @@ host keeps capture and converted output running, disables only the monitor
 callback, and exposes the bounded failure through `lastError` instead of
 turning a monitor problem into a full-session startup failure.
 
+The desktop status layer also distinguishes an idle microphone from a stalled
+output route. After capture has started, an active input peak with no
+corresponding output peak raises a recovery action instead of leaving the
+session looking healthy. This is intentionally explicit because virtual cable
+endpoints can remain enumerated while their graph is disconnected.
+
 ## Inference interface
 
 `src-tauri/src/inference.rs` defines a backend-neutral contract with the following lifecycle:

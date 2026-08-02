@@ -203,6 +203,17 @@ These values diagnose the stage that is failing. A high Python model time is dif
 > [!WARNING]
 > Passthrough or converted audio can feed back immediately if it is routed to speakers near the active microphone. Use headphones for the Monitor route.
 
+### Windows route diagnostics
+
+The optional `audio_validation.py` harness uses a full-duplex PortAudio stream
+to measure a selected input/output pair. On Windows, select matching WASAPI
+endpoints for that probe. Some WDM-KS driver pairs block while opening a
+full-duplex stream even though each endpoint can be opened independently; the
+harness now rejects that topology before opening it and reports the host names
+instead of appearing to hang. The production native engine remains on CPAL /
+WASAPI and reports a stalled route in the desktop UI when input is active but
+the output peak stays idle.
+
 A common voice-chat route is:
 
 ```text

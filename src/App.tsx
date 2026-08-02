@@ -986,9 +986,19 @@ function App() {
   );
   const conversionReady = selectedModelLoaded && !selectedModelNeedsReload;
   const signalActive = running;
+  const workerRecovering = running && liveRvcStatus.workerState === "recovering";
   const hasInputSignal = signalActive && ["passthrough", "rvc"].includes(engineStatus.state) && engineStatus.inputPeak > 0.001;
   const hasOutputSignal = signalActive && ["passthrough", "rvc"].includes(engineStatus.state) && engineStatus.outputPeak > 0.001;
   const hasMonitorSignal = signalActive && Boolean(engineStatus.monitorDeviceId) && engineStatus.monitorPeak > 0.001;
+  // A live input with a completely idle output is different from a quiet
+  // microphone. Surface that distinction so a disconnected virtual cable or
+  // stale Windows endpoint does not look like a healthy conversion session.
+  const outputRouteStalled = signalActive
+    && !workerRecovering
+    && engineStatus.capturedFrames >= 4_800
+    && engineStatus.inputPeak > 0.01
+    && engineStatus.outputPeak <= 0.0005
+    && (engineStatus.state === "passthrough" || engineStatus.inferenceCalls > 0);
   const inputPeakTone = peakTone(engineStatus.inputPeak);
   const outputPeakTone = peakTone(engineStatus.outputPeak);
   const clippingMessage = inputPeakTone === "clip" && outputPeakTone === "clip"
@@ -996,7 +1006,6 @@ function App() {
     : inputPeakTone === "clip"
       ? "Input is clipping. Lower input gain or move the microphone farther away."
       : "Output is clipping. Lower output gain or the source level.";
-  const workerRecovering = running && liveRvcStatus.workerState === "recovering";
   const engineLabel = workerRecovering
     ? "Recovering voice engine"
     : !running
@@ -2305,6 +2314,7 @@ function App() {
             {!startupBusy && !audioReady && <div className="info-callout error" role="alert"><span>!</span><p><strong>Audio route incomplete.</strong> Refresh devices, then choose both a microphone and an output.</p></div>}
             {sampleRateDifference && <div className="info-callout warning" role="status"><span>↔</span><p><strong>Device rates differ.</strong> VC Next will resample the route to its 48 kHz RVC path. A matched-rate route may use slightly less CPU.</p></div>}
             {(inputPeakTone === "clip" || outputPeakTone === "clip") && <div className="info-callout error" role="alert"><span>!</span><p><strong>Clipping detected.</strong> {clippingMessage}</p></div>}
+            {outputRouteStalled && <div className="info-callout error" role="alert"><span>!</span><p><strong>Input is active but output is idle.</strong> Check the selected output or virtual-cable input, then restart audio.</p><button type="button" className="details-toggle" onClick={recoverAudioSession} disabled={engineBusy}>Restart audio</button></div>}
             {selectedModelCanLoad && !inferenceRuntime.readyForRvc && !startupBusy && <div className="info-callout warning"><span>!</span><p><strong>RVC runtime needs attention.</strong> {inferenceRuntime.blockers.slice(0, 3).join(" · ") || "Check Engine details before loading this voice."}</p><div className="callout-actions"><button type="button" className="details-toggle" onClick={() => void launchRuntimeSetup()} disabled={runtimeRefreshBusy || running}>{runtimeRefreshBusy ? "Opening…" : "Run setup"}</button><button type="button" className="details-toggle" onClick={() => void copyRuntimeSetupCommand()}>Copy command</button></div></div>}
             {onnxCpuFallback && <div className="info-callout warning" role="status"><span>!</span><p><strong>ONNX generator is using CPU.</strong> The model is compatible, but this provider is not a low-latency guarantee. Install a working ONNX Runtime CUDA stack or use the PyTorch checkpoint when available.</p></div>}
             {workerRecovering && <div className="info-callout warning" role="status"><span>↻</span><p><strong>Voice worker is recovering.</strong> Audio stays live with silence while the model process restarts and warms again.</p></div>}

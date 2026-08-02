@@ -128,6 +128,33 @@ def _device_label(sd: Any, device: int | str | None) -> str:
     return str(device)
 
 
+def validate_capture_devices(sd: Any, input_device: int | str | None, output_device: int | str | None) -> None:
+    """Reject host topologies that cannot safely open this full-duplex probe.
+
+    PortAudio's WDM-KS implementation can block while opening a simultaneous
+    input/output stream on some Windows drivers.  The production Rust route
+    uses CPAL/WASAPI, so silently attempting that topology in this QA helper
+    only creates a misleading frozen process.  Fail before opening the stream
+    and tell the caller which host to select instead.
+    """
+
+    if not isinstance(input_device, int) or not isinstance(output_device, int):
+        return
+    try:
+        input_info = sd.query_devices(input_device)
+        output_info = sd.query_devices(output_device)
+        input_host = sd.query_hostapis(int(input_info["hostapi"]))["name"]
+        output_host = sd.query_hostapis(int(output_info["hostapi"]))["name"]
+    except Exception:
+        return
+    if input_host == "Windows WDM-KS" or output_host == "Windows WDM-KS":
+        raise RuntimeError(
+            "The full-duplex validation probe does not open Windows WDM-KS "
+            "endpoints safely. Select matching Windows WASAPI endpoints "
+            f"instead (input host: {input_host}; output host: {output_host})."
+        )
+
+
 def build_impulse_schedule(
     *,
     total_frames: int,
@@ -152,6 +179,22 @@ def build_impulse_schedule(
     return total_frames, list(range(block_size, total_frames, interval_frames))
 
 
+def capture_timeout_seconds(total_frames: int, sample_rate: int) -> float:
+    """Return a bounded wall-clock budget for a callback capture.
+
+    PortAudio normally advances the callback cursor in real time.  A device
+    that opens but never delivers callbacks used to leave this QA harness
+    sleeping forever, which made a bad Windows route look like a frozen app.
+    Leave enough slack for shared-mode scheduling while keeping endpoint
+    failures actionable.
+    """
+
+    if total_frames <= 0 or sample_rate <= 0:
+        raise ValueError("total_frames and sample_rate must be positive")
+    capture_seconds = total_frames / sample_rate
+    return max(5.0, capture_seconds * 1.5 + 2.0)
+
+
 def run_capture(
     *,
     mode: str,
@@ -165,6 +208,7 @@ def run_capture(
     threshold: float,
 ) -> dict[str, Any]:
     sd = _load_sounddevice()
+    validate_capture_devices(sd, input_device, output_device)
     interval_frames = max(block_size, round(sample_rate * impulse_interval))
     total_frames = max(1, round(sample_rate * seconds))
     if mode == "loopback":
@@ -212,6 +256,7 @@ def run_capture(
             raise sd.CallbackStop()
 
     started = time.perf_counter()
+    timeout_seconds = capture_timeout_seconds(total_frames, sample_rate)
     with sd.Stream(
         samplerate=sample_rate,
         blocksize=block_size,
@@ -221,7 +266,16 @@ def run_capture(
         callback=callback,
     ):
         while cursor < total_frames:
-            time.sleep(min(0.25, max(0.01, (total_frames - cursor) / sample_rate)))
+            elapsed = time.perf_counter() - started
+            if elapsed >= timeout_seconds:
+                raise RuntimeError(
+                    "The audio callback did not deliver the requested capture "
+                    f"within {timeout_seconds:.1f}s ({cursor}/{total_frames} frames). "
+                    "The selected endpoint may be silent, busy, or incompatible "
+                    "with the requested sample rate."
+                )
+            remaining = max(0.01, (total_frames - cursor) / sample_rate)
+            time.sleep(min(0.25, remaining, timeout_seconds - elapsed))
     elapsed_ms = (time.perf_counter() - started) * 1_000.0
     recorded = np.concatenate(recorded_chunks)[:total_frames] if recorded_chunks else np.zeros(0, dtype=np.float32)
     report: dict[str, Any] = {

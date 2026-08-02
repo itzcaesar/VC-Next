@@ -11,9 +11,11 @@ sys.path.insert(0, str(ENGINE_ROOT / "tools"))
 
 from audio_validation import (  # noqa: E402
     build_impulse_schedule,
+    capture_timeout_seconds,
     match_impulses,
     percentile,
     summarize_matches,
+    validate_capture_devices,
 )
 
 
@@ -62,6 +64,24 @@ class AudioValidationTests(unittest.TestCase):
         )
         self.assertEqual(total_frames, 100_000)
         self.assertEqual(positions, [480, 48_480, 96_480])
+
+    def test_capture_timeout_has_runtime_slack_and_rejects_invalid_geometry(self) -> None:
+        self.assertAlmostEqual(capture_timeout_seconds(48_000, 48_000), 5.0)
+        with self.assertRaises(ValueError):
+            capture_timeout_seconds(0, 48_000)
+
+    def test_wdmks_full_duplex_probe_fails_before_open(self) -> None:
+        class FakeSoundDevice:
+            @staticmethod
+            def query_devices(index):
+                return {"hostapi": 3}
+
+            @staticmethod
+            def query_hostapis(_index):
+                return {"name": "Windows WDM-KS"}
+
+        with self.assertRaisesRegex(RuntimeError, "WDM-KS"):
+            validate_capture_devices(FakeSoundDevice(), 88, 85)
 
 
 if __name__ == "__main__":
