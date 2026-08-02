@@ -6,8 +6,16 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:release": "npm run build && npm run release:prepare",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-release.ps1",
+    "release:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-release.ps1",
+    "runtime:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-runtime.ps1",
+    "validate:reference": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-reference-validation.ps1",
+    "validate:route": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-live-route-validation.ps1",
+    "validate:native-route": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-native-route-validation.ps1",
+    "validate:native-speech": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-native-speech-loopback.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
