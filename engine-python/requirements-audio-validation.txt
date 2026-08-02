@@ -1,0 +1,2 @@
+# Optional hardware QA harness; not required for normal VC Next operation.
+sounddevice>=0.5,<1
