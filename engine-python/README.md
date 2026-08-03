@@ -1,6 +1,6 @@
 # VC Next Python engine
 
-The Python package provides RVC v1/v2 PyTorch and exported five-input ONNX model compatibility, ContentVec and RMVPE inference, optional FAISS retrieval, offline conversion, and the persistent live worker used by the Tauri desktop host. Its live compatibility path defaults to the current w-okada nearest-vector (`k=1`) retrieval rule, source-volume matching, the RVC-v2 16 kHz feature-window geometry, the `resampy` `kaiser_fast` boundary filter, the upstream RMVPE ONNX threshold (`0.30`), and an RMS-plus-activity idle gate so decoder bias cannot become static without cutting off a short quiet syllable.
+The Python package provides RVC v1/v2 PyTorch and exported five-input ONNX model compatibility, ContentVec and RMVPE inference, optional Fairseq HuBERT and FAISS retrieval, offline conversion, and the persistent live worker used by the Tauri desktop host. Its live compatibility path defaults to the current w-okada nearest-vector (`k=1`) retrieval rule, source-volume matching, the RVC-v2 16 kHz feature-window geometry, the `resampy` `kaiser_fast` boundary filter, the upstream RMVPE ONNX threshold (`0.30`), and an RMS-plus-activity idle gate so decoder bias cannot become static without cutting off a short quiet syllable.
 
 > [!NOTE]
 > This package is an internal engine component. Normal users start VC Next through `npm run tauri dev`; they do not run the worker manually.
@@ -36,8 +36,29 @@ py -3.11 -m venv engine-python/.venv
 | --- | --- |
 | `requirements-rvc-core.txt` | NumPy, SoundFile, FAISS CPU, and the w-okada-compatible `resampy` filter |
 | `requirements-rvc-optional.txt` | ONNX Runtime GPU |
+| `requirements-rvc-hubert.txt` | Optional Python 3.11-compatible Hydra/OmegaConf and Fairseq support dependencies |
 
 PyTorch and Torchaudio are installed separately so the CUDA wheel source is explicit.
+
+### Optional Fairseq HuBERT compatibility
+
+Most RVC packages should use the canonical `contentvec-f.onnx` embedder. Some
+w-okada bundles instead ship the original Fairseq `hubert_base.pt` checkpoint.
+To load one of those explicitly, install the opt-in compatibility backend after
+the normal runtime setup:
+
+```powershell
+.\scripts\setup-runtime.ps1 -InstallHubert
+```
+
+The switch installs Fairseq 0.12.2 without its legacy dependency pins and then
+adds the tested Python 3.11 dependency set. It is intentionally not part of the
+default setup: Fairseq is slower to initialize, adds a large legacy dependency,
+and the ONNX path remains the better default for ordinary live sessions. The
+desktop model-package dialog accepts `.pt` and `.pth` feature files; selecting
+one makes the worker report `featureBackend: "fairseq-hubert"`. If Fairseq is
+not installed, the load fails with an actionable message and the existing
+loaded voice is left untouched.
 
 ## Runtime probe
 
@@ -101,6 +122,20 @@ The worker can auto-discover common w-okada-style assets:
 
 An optional matching `.index` can be selected explicitly or paired from the checkpoint directory. Model assets are external inputs and must not be committed.
 
+The feature embedder is selected by its extension when an explicit path is
+provided. Auto-discovery prefers ContentVec ONNX and falls back to a standard
+`hubert_base.pt`/`.pth` only when no compatible ONNX file is present:
+
+| File | Backend | Notes |
+| --- | --- | --- |
+| `contentvec-f.onnx` (or another compatible `.onnx`) | ONNX Runtime CUDA | Default, fastest startup and broadest packaging support |
+| `hubert_base.pt` / `hubert_base.pth` | Fairseq HuBERT + ONNX RMVPE | Optional w-okada-compatible fallback; requires `-InstallHubert` |
+
+The model checkpoint and the feature embedder are separate assets. A voice
+checkpoint remains the `.pth` generator, while a sibling `.index` is loaded
+only when retrieval strength is above zero. Never select the generator `.pth`
+as the feature embedder.
+
 ### w-okada package defaults
 
 When a checkpoint has a sibling `params.json`, `load_model` safely imports its
@@ -142,6 +177,18 @@ work.
   --contentvec C:\path\contentvec-f.onnx `
   --rmvpe C:\path\rmvpe_20231006.onnx `
   --max-seconds 3
+```
+
+The same command accepts a Fairseq HuBERT feature checkpoint in `--contentvec`
+when the optional backend is installed:
+
+```powershell
+.\engine-python\.venv\Scripts\python.exe -m vc_next_sidecar.offline_cli `
+  --input C:\path\speech.wav `
+  --output C:\path\converted.wav `
+  --model C:\path\voice.pth `
+  --contentvec C:\path\hubert_base.pt `
+  --rmvpe C:\path\rmvpe_20231006.onnx
 ```
 
 The offline tool is useful for isolating checkpoint and feature-pipeline problems from native device routing.

@@ -39,7 +39,7 @@ The project is built around four practical goals:
 | Models | RVC v1/v2 PyTorch checkpoints and exported five-input ONNX generators, with 32, 40, or 48 kHz generator output |
 | Library | Persistent local model entries with custom names, search, rename, and safe removal |
 | Retrieval | Optional paired FAISS `.index` loading with dimension validation |
-| Features | ContentVec encoding and RMVPE pitch extraction through ONNX Runtime |
+| Features | ContentVec encoding and RMVPE pitch extraction through ONNX Runtime, with an optional Fairseq HuBERT fallback |
 | Controls | Pitch ±50 semitones, retrieval strength, protect ratio, speaker ID, RMVPE threshold, Chunk, and Extra/context |
 | Streaming | Quality, Balanced, and Low-latency presets plus explicit custom stream geometry |
 | Stability | Adaptive playback priming, bounded clock-drift correction, underrun recovery, device-loss detection, and supervised Python-worker restart |
@@ -163,12 +163,12 @@ npm run dev
 1. Select **Import a voice model** to open **Add model package**.
 2. In **Checkpoint / ONNX model**, choose the RVC `.pth` checkpoint or exported five-input `.onnx` generator. VC Next inspects it locally and lists detected sibling indexes. If you have a w-okada `model` or `model_dir` folder, use **Choose folder**; VC Next scans a bounded package depth and lets you pick the checkpoint it found.
 3. In **Retrieval index**, use the recommended `.index`, choose another file, or select **Use none**.
-4. In **ContentVec embedder**, choose an explicit `.onnx` file or leave auto-discovery enabled.
+4. In **Feature embedder**, choose an explicit ContentVec `.onnx` file or Fairseq HuBERT `.pt/.pth`, or leave auto-discovery enabled for the canonical ONNX asset.
 5. Give the voice a display name and select **Add model**.
 6. Select the imported voice and press **Load voice**.
 7. Wait for **Loaded and warmed** before starting audio.
 
-Imported entries and the last selection persist locally. The model menu can rename an entry or remove it from the library without deleting its checkpoint or index from disk. Exported five-input RVC `.onnx` generators can be loaded when their ContentVec/RMVPE assets are available; models with unusual signatures still require compatibility validation.
+Imported entries and the last selection persist locally. The model menu can rename an entry or remove it from the library without deleting its checkpoint or index from disk. Exported five-input RVC `.onnx` generators can be loaded when their feature/RMVPE assets are available; models with unusual signatures still require compatibility validation. Fairseq HuBERT `.pt/.pth` feature checkpoints are opt-in and require `scripts\setup-runtime.ps1 -InstallHubert`.
 
 ### Keeping a w-okada voice sounding like the original
 

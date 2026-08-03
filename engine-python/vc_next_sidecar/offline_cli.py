@@ -11,7 +11,11 @@ def main() -> int:
     parser.add_argument("--input", required=True, help="source audio file")
     parser.add_argument("--output", required=True, help="destination WAV file")
     parser.add_argument("--model", required=True, help="trusted RVC .pth checkpoint")
-    parser.add_argument("--contentvec", required=True, help="ContentVec ONNX model")
+    parser.add_argument(
+        "--contentvec",
+        required=True,
+        help="ContentVec .onnx or Fairseq HuBERT .pt/.pth feature embedder",
+    )
     parser.add_argument("--rmvpe", required=True, help="RMVPE ONNX model")
     parser.add_argument("--index", help="optional sibling FAISS .index file")
     parser.add_argument("--speaker-id", type=int, default=0)

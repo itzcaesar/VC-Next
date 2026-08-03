@@ -43,7 +43,7 @@ if ($LASTEXITCODE -ne 0 -or $pythonInfo.Count -lt 2) {
 
 New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $engineSource "vc_next_sidecar") -Destination $outputPath -Recurse -Force
-foreach ($file in @("pyproject.toml", "requirements-rvc-core.txt", "requirements-rvc-optional.txt", "README.md")) {
+foreach ($file in @("pyproject.toml", "requirements-rvc-core.txt", "requirements-rvc-optional.txt", "requirements-rvc-hubert.txt", "README.md")) {
     Copy-Item -LiteralPath (Join-Path $engineSource $file) -Destination $outputPath -Force
 }
 # Include the same first-run bootstrap used by the source checkout.  The script

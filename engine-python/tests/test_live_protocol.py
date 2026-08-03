@@ -172,11 +172,31 @@ class AssetDiscoveryTests(unittest.TestCase):
             model.parent.mkdir(parents=True)
             model.write_bytes(b"model")
 
-            with self.assertRaisesRegex(ValueError, "Missing: ContentVec \(.onnx\), RMVPE \(.onnx\)") as context:
+            with self.assertRaisesRegex(ValueError, "Missing: ContentVec/Fairseq HuBERT feature embedder \(.onnx/.pt\), RMVPE \(.onnx\)") as context:
                 discover_feature_models(str(model))
 
         self.assertIn("searched:", str(context.exception))
         self.assertIn("main\\modules", str(context.exception))
+
+    def test_auto_discovery_falls_back_to_fairseq_hubert_when_onnx_is_absent(self) -> None:
+        from vc_next_sidecar.live_worker import discover_feature_models
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "Voice Changer" / "model_dir" / "5" / "voice.pth"
+            hubert = root / "Voice Changer" / "main" / "modules" / "contentvec" / "hubert_base.pt"
+            rmvpe = root / "Voice Changer" / "main" / "modules" / "rmvpe" / "rmvpe_20231006.onnx"
+            model.parent.mkdir(parents=True)
+            hubert.parent.mkdir(parents=True)
+            rmvpe.parent.mkdir(parents=True)
+            model.write_bytes(b"model")
+            hubert.write_bytes(b"hubert")
+            rmvpe.write_bytes(b"pitch")
+
+            actual_feature, actual_rmvpe = discover_feature_models(str(model))
+
+        self.assertEqual(actual_feature, str(hubert.resolve()))
+        self.assertEqual(actual_rmvpe, str(rmvpe.resolve()))
 
     def test_handshake_reports_the_streaming_shape(self) -> None:
         import json
@@ -193,6 +213,14 @@ class AssetDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["analysisFrames"], 24_000)
         self.assertEqual(result["crossfadeFrames"], 4_096)
         self.assertEqual(result["solaSearchFrames"], 576)
+
+    def test_empty_status_exposes_feature_backend_contract(self) -> None:
+        from vc_next_sidecar.live_worker import LiveRvcProcessor
+
+        status = LiveRvcProcessor().status()
+
+        self.assertEqual(status["featureBackend"], "contentvec-onnx")
+        self.assertIsNone(status["featurePath"])
 
     def test_streaming_presets_have_valid_distinct_shapes(self) -> None:
         from vc_next_sidecar.stream_config import STREAM_PROFILES, get_stream_profile
@@ -333,7 +361,7 @@ class AssetDiscoveryTests(unittest.TestCase):
             model = Path(directory) / "voice.pth"
             model.write_bytes(b"checkpoint")
             processor = LiveRvcProcessor()
-            with self.assertRaisesRegex(ValueError, "ContentVec and RMVPE assets"):
+            with self.assertRaisesRegex(ValueError, "Feature embedder and RMVPE assets"):
                 processor.load({"modelPath": str(model)})
             self.assertEqual(processor.status()["state"], "empty")
 

@@ -10,7 +10,7 @@ VC Next can:
 
 - import and inspect an RVC checkpoint, either directly or by scanning a bounded w-okada model folder;
 - pair it with an optional FAISS `.index`;
-- discover or explicitly select ContentVec assets;
+- discover or explicitly select ContentVec or Fairseq HuBERT feature assets;
 - load RVC v1/v2 generators targeting 32, 40, or 48 kHz;
 - warm the complete model session on CUDA, including one exact Chunk/SOLA request before reporting Ready;
 - retain the session between live audio hops;
@@ -64,7 +64,11 @@ sequenceDiagram
     Rust->>Rust: Confirm audio is stopped
     Rust->>Py: load_model(paths + settings)
     Py->>Py: Weights-only schema validation
-    Py->>GPU: Construct ContentVec + RMVPE + generator
+    alt Explicit Fairseq HuBERT feature asset
+        Py->>GPU: Construct Fairseq HuBERT + RMVPE + generator
+    else ContentVec feature asset
+        Py->>GPU: Construct ContentVec + RMVPE + generator
+    end
     Py->>Py: Validate and reconstruct optional index
     Py->>GPU: Silent warm-up pass
     Py-->>Rust: Ready status + effective geometry
@@ -92,7 +96,7 @@ For each trailing analysis window, Python performs:
 ```text
 48 kHz live history
   → 16 kHz feature waveform (w-okada `resampy` `kaiser_fast`)
-  ├── ContentVec content features
+  ├── ContentVec or Fairseq HuBERT content features
   └── RMVPE pitch and periodicity
   → optional FAISS retrieval blend
   → RVC pitch quantization and feature interpolation
@@ -127,7 +131,9 @@ model-specific defaults for pitch, retrieval ratio, Protect ratio, Chunk, the
 matching sibling index, and Hubert/ContentVec asset preference. A package using
 `hubert_base_l12` follows w-okada's observed resolver and selects the canonical
 `contentvec/contentvec-f.onnx` asset when both ContentVec and Rinna Hubert are
-present. Explicit UI settings override imported metadata; old library entries
+present. Explicit UI settings can instead select a Fairseq `hubert_base.pt`
+checkpoint when the optional compatibility runtime is installed. Explicit UI
+settings override imported metadata; old library entries
 are migrated once if they still contain the original prototype defaults.
 
 The engine applies safety rules:

@@ -151,6 +151,223 @@ class OnnxFeaturePipeline:
         return restored
 
 
+def _load_fairseq_checkpoint_utils() -> Any:
+    """Import Fairseq on Python 3.11 without changing the installed package.
+
+    w-okada ships Fairseq 0.12.x, whose configuration dataclasses predate
+    Python 3.11's mutable-default validation.  The compatibility shim is
+    scoped to the import and is only used when a user explicitly selects a
+    Fairseq HuBERT ``.pt`` asset; the normal ONNX path never imports Fairseq.
+    """
+
+    import dataclasses
+
+    original_get_field = dataclasses._get_field
+    missing = dataclasses.MISSING
+
+    def compatible_get_field(cls: Any, name: str, annotation: Any, kw_only: bool) -> Any:
+        default = getattr(cls, name, missing)
+        changed = False
+        if getattr(cls, "__module__", "").startswith("fairseq"):
+            value = default.default if isinstance(default, dataclasses.Field) else default
+            if value is not missing and value.__class__.__hash__ is None:
+                if isinstance(default, dataclasses.Field):
+                    replacement = dataclasses.field(
+                        default_factory=value.__class__,
+                        init=default.init,
+                        repr=default.repr,
+                        hash=default.hash,
+                        compare=default.compare,
+                        metadata=default.metadata,
+                        kw_only=default.kw_only,
+                    )
+                else:
+                    replacement = dataclasses.field(default_factory=value.__class__)
+                setattr(cls, name, replacement)
+                changed = True
+        try:
+            return original_get_field(cls, name, annotation, kw_only)
+        finally:
+            if changed:
+                setattr(cls, name, default)
+
+    dataclasses._get_field = compatible_get_field
+    config_store = None
+    original_store = None
+    try:
+        try:
+            from hydra.core.config_store import ConfigStore
+
+            config_store = ConfigStore
+            original_store = ConfigStore.store
+            # Fairseq's import-time registry is not needed for inference and
+            # OmegaConf 2.3 rejects one of its legacy MISSING sentinels.
+            ConfigStore.store = lambda self, *args, **kwargs: None
+        except ImportError:
+            pass
+        from fairseq import checkpoint_utils
+
+        return checkpoint_utils
+    except ImportError as error:
+        raise RuntimeError(
+            "Fairseq HuBERT support is not installed. Install the optional "
+            "Fairseq compatibility dependency or select a ContentVec .onnx embedder."
+        ) from error
+    finally:
+        dataclasses._get_field = original_get_field
+        if config_store is not None and original_store is not None:
+            config_store.store = original_store
+
+
+class FairseqHubertFeaturePipeline:
+    """Feature extractor compatible with w-okada's Fairseq HuBERT fallback."""
+
+    def __init__(self, hubert_path: str, rmvpe_path: str, *, feature_channels: int = 768) -> None:
+        if feature_channels not in {256, 768}:
+            raise ValueError(f"Unsupported Fairseq HuBERT feature width: {feature_channels}.")
+        import torch
+        import onnxruntime as ort
+
+        checkpoint_utils = _load_fairseq_checkpoint_utils()
+        original_load = torch.load
+
+        def trusted_checkpoint_load(*args: Any, **kwargs: Any) -> Any:
+            # Fairseq's official HuBERT checkpoint contains task metadata and
+            # cannot be loaded with PyTorch's weights-only restriction. This
+            # path is reachable only for the explicit user-selected embedder.
+            kwargs.setdefault("weights_only", False)
+            return original_load(*args, **kwargs)
+
+        torch.load = trusted_checkpoint_load
+        try:
+            models, _saved_cfg, _task = checkpoint_utils.load_model_ensemble_and_task(
+                [str(Path(hubert_path).resolve())],
+                suffix="",
+            )
+        finally:
+            torch.load = original_load
+        if not models:
+            raise ValueError("The Fairseq HuBERT checkpoint did not contain a model.")
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = models[0].eval().to(self.device)
+        self.use_half = self.device.type == "cuda"
+        if self.use_half:
+            self.model = self.model.half()
+        self.feature_channels = feature_channels
+        self.output_layer = 12 if feature_channels == 768 else 9
+        self.use_final_proj = feature_channels == 256
+
+        options = ort.SessionOptions()
+        options.log_severity_level = 3
+        requested_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        self.pitch_session = ort.InferenceSession(
+            str(Path(rmvpe_path).resolve()),
+            sess_options=options,
+            providers=requested_providers,
+        )
+        self.providers = [
+            f"FairseqHuBERT({self.device.type})",
+            *self.pitch_session.get_providers(),
+        ]
+        if self.device.type != "cuda":
+            raise ValueError("The Fairseq HuBERT feature pipeline requires CUDA.")
+        if self.pitch_session.get_providers()[0] != "CUDAExecutionProvider":
+            raise ValueError("The ONNX pitch pipeline did not activate its CUDA provider.")
+
+    def extract_content(self, waveform_16k: np.ndarray) -> np.ndarray:
+        import torch
+
+        waveform = np.asarray(waveform_16k, dtype=np.float32).reshape(-1)
+        if waveform.size == 0:
+            raise ValueError("Fairseq HuBERT requires a non-empty waveform.")
+        source = torch.from_numpy(waveform).unsqueeze(0).to(self.device)
+        padding_mask = torch.zeros(source.shape, dtype=torch.bool, device=self.device)
+        with torch.no_grad():
+            with torch.autocast(
+                device_type="cuda",
+                dtype=torch.float16,
+                enabled=self.use_half,
+            ):
+                logits = self.model.extract_features(
+                    source=source,
+                    padding_mask=padding_mask,
+                    output_layer=self.output_layer,
+                )[0]
+                features = self.model.final_proj(logits) if self.use_final_proj else logits
+        result = features.detach().float().cpu().numpy()
+        if result.ndim != 3 or result.shape[2] != self.feature_channels:
+            raise ValueError(f"Fairseq HuBERT returned an unexpected shape: {result.shape!r}.")
+        if not np.isfinite(result).all():
+            raise ValueError("Fairseq HuBERT returned non-finite features.")
+        return result
+
+    def extract_pitch(
+        self,
+        waveform_16k: np.ndarray,
+        threshold: float = 0.30,
+        *,
+        silence_front_samples: int = 0,
+        output_frames: int | None = None,
+    ) -> np.ndarray:
+        """Use the same RMVPE front-context rule as :class:`OnnxFeaturePipeline`."""
+
+        waveform = np.asarray(waveform_16k, dtype=np.float32).reshape(-1)
+        if waveform.size == 0:
+            raise ValueError("RMVPE requires a non-empty waveform.")
+        offset = max(0, int(silence_front_samples))
+        offset = min(waveform.size, (offset // 160) * 160)
+        target_length = max(160, waveform.size - offset)
+        source = waveform[-target_length:]
+        pitch = self.pitch_session.run(
+            ["pitchf"],
+            {
+                "waveform": source[None].astype(np.float32, copy=False),
+                "threshold": np.asarray([threshold], dtype=np.float32),
+            },
+        )[0]
+        pitch = np.asarray(pitch, dtype=np.float32).reshape(-1)
+        if not np.isfinite(pitch).all():
+            raise ValueError("RMVPE returned non-finite pitch values.")
+        frame_count = (
+            max(1, waveform.size // 160)
+            if output_frames is None
+            else max(1, int(output_frames))
+        )
+        restored = np.zeros(frame_count, dtype=np.float32)
+        copy_count = min(frame_count, pitch.size)
+        if copy_count:
+            restored[-copy_count:] = pitch[-copy_count:]
+        return restored
+
+
+def load_feature_pipeline(
+    feature_path: str,
+    rmvpe_path: str,
+    *,
+    feature_channels: int = 768,
+) -> OnnxFeaturePipeline | FairseqHubertFeaturePipeline:
+    """Construct the feature extractor selected by the asset extension.
+
+    ContentVec ONNX remains the default compatibility path.  A Fairseq
+    HuBERT checkpoint is opt-in because it requires the optional legacy
+    Fairseq runtime and can be substantially slower to initialize.
+    """
+
+    path = Path(feature_path).expanduser().resolve()
+    if path.suffix.casefold() in {".pt", ".pth"}:
+        return FairseqHubertFeaturePipeline(
+            str(path),
+            rmvpe_path,
+            feature_channels=feature_channels,
+        )
+    return OnnxFeaturePipeline(
+        str(path),
+        rmvpe_path,
+        feature_channels=feature_channels,
+    )
+
+
 def _load_mono_16k(input_path: str, max_seconds: float | None) -> tuple[np.ndarray, int]:
     import soundfile as sf
     from .resampling import resample_kaiser_fast
@@ -509,7 +726,7 @@ def convert_file(
     total_started = perf_counter()
     waveform, input_sample_rate = _load_mono_16k(input_path, max_seconds)
     loaded = load_generator(model_path)
-    features = OnnxFeaturePipeline(
+    features = load_feature_pipeline(
         contentvec_path,
         rmvpe_path,
         feature_channels=loaded.feature_channels,

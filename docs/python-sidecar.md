@@ -180,9 +180,44 @@ or:
 <root>/main/modules/rmvpe/rmvpe_20231006.onnx
 ```
 
-This allows models under both w-okada `main/model_dir/<slot>` and neighboring `voice model` folders to share the same engine assets. The import workflow can also provide an explicit ContentVec `.onnx` path.
+This allows models under both w-okada `main/model_dir/<slot>` and neighboring `voice model` folders to share the same engine assets. The import workflow can also provide an explicit feature embedder path.
 
-The loader also accepts common w-okada/RVC asset aliases such as `contentvec.onnx`, `contentvec_f.onnx`, `rmvpe_onnx.onnx`, `rmvpe.onnx`, and `rmvpe_2023.onnx`. If a bundle uses a different filename, select the ContentVec embedder explicitly in the model package dialog; RMVPE is still validated before CUDA warm-up.
+The loader also accepts common w-okada/RVC asset aliases such as `contentvec.onnx`, `contentvec_f.onnx`, `rmvpe_onnx.onnx`, `rmvpe.onnx`, and `rmvpe_2023.onnx`. If a bundle uses a different filename, select the feature embedder explicitly in the model package dialog; RMVPE is still validated before CUDA warm-up.
+
+### Feature backend selection
+
+VC Next keeps the feature path compatible with both families of assets found in
+w-okada packages:
+
+| Explicit asset | Worker backend | Runtime requirement |
+| --- | --- | --- |
+| ContentVec `.onnx` | `contentvec-onnx` | ONNX Runtime CUDA (default) |
+| Fairseq HuBERT `hubert_base.pt` or `.pth` | `fairseq-hubert` | Optional Fairseq 0.12.2 compatibility install plus ONNX RMVPE |
+
+From a source checkout, install the optional backend with
+`scripts/setup-runtime.ps1 -InstallHubert`. The normal runtime setup omits it;
+ContentVec ONNX remains the default and does not import Fairseq.
+
+The worker does not guess that a generator checkpoint is a HuBERT model. It
+chooses the backend from the selected feature file extension; auto-discovery
+prefers the canonical `contentvec/contentvec-f.onnx` path and falls back to a
+standard `hubert_base.pt`/`.pth` only when no compatible ONNX embedder exists.
+This avoids silently changing the voice when a package contains both ONNX and
+Fairseq assets.
+
+Fairseq is loaded lazily, only after an explicit `.pt`/`.pth` selection. The
+compatibility loader temporarily adapts Fairseq's Python 3.11 dataclasses and
+Hydra registry during import, then restores the process-wide functions. The
+checkpoint is intentionally loaded with `weights_only=False` only on this
+trusted, user-selected HuBERT path because Fairseq's official checkpoint
+contains task metadata; normal RVC generator inspection and loading retain the
+restricted weights-only policy. If Fairseq is absent or its CUDA path cannot be
+activated, model load fails before replacing the currently loaded voice.
+
+The status contract exposes both the legacy `contentvecPath` key and the
+backend-neutral aliases `featurePath` and `featureBackend`. This lets older UI
+clients continue to work while diagnostics can distinguish ContentVec from
+Fairseq HuBERT.
 
 ### Package metadata compatibility
 
@@ -217,13 +252,19 @@ sequenceDiagram
     participant Rust as Tauri / Rust
     participant Worker as Python worker
     participant ORT as ONNX Runtime
+    participant Fairseq as Optional Fairseq HuBERT
     participant Torch as PyTorch CUDA
 
     Rust->>Worker: handshake
     Worker-->>Rust: protocol and default stream shape
     Rust->>Worker: load_model(checkpoint, index, settings)
     Worker->>Torch: validate and construct generator
-    Worker->>ORT: construct ContentVec and RMVPE sessions
+    alt Explicit .pt/.pth feature asset
+        Worker->>Fairseq: load HuBERT checkpoint and move to CUDA
+        Worker->>ORT: construct RMVPE CUDA session
+    else ContentVec .onnx or auto-discovered asset
+        Worker->>ORT: construct ContentVec and RMVPE sessions
+    end
     Worker->>Worker: load and reconstruct optional FAISS index
     Worker->>Torch: silent warm-up inference
     Worker-->>Rust: ready status and effective stream shape
@@ -244,7 +285,8 @@ Each analysis pass performs:
 1. 48 kHz input resampling to the 16 kHz feature rate using w-okada's
    `resampy` `kaiser_fast` filter (with a matching torchaudio fallback during
    partial runtime setup);
-2. ContentVec content-feature extraction;
+2. feature-embedder extraction (ContentVec ONNX by default, or explicit
+   Fairseq HuBERT for w-okada bundles that provide `hubert_base.pt`);
 3. RMVPE F0 and periodicity extraction;
 4. optional FAISS retrieval (nearest-neighbor `k=1` by default, with an explicit weighted-neighbor comparison mode);
 5. v1/v2 feature preparation and pitch quantization;
@@ -357,7 +399,7 @@ Run an offline conversion:
 
 ## Current limitations
 
-- The verified runtime is Windows/NVIDIA with CUDA. The runtime probe checks both PyTorch CUDA and the ONNX Runtime CUDA provider because ContentVec and RMVPE are required for every live RVC session.
+- The verified runtime is Windows/NVIDIA with CUDA. The runtime probe checks both PyTorch CUDA and the ONNX Runtime CUDA provider because the default ContentVec and RMVPE path is required for every live RVC session. Fairseq HuBERT is optional and appears as a separate capability when installed.
 - RMVPE is the only connected live F0 extractor.
 - The worker consumes mono 48 kHz live PCM even when the generator targets another output rate.
 - Exported five-input RVC `.onnx` generators are supported by the live worker. The loader validates the required `feats`, `p_len`, `pitch`, `pitchf`, and `sid` inputs, while other exported signatures remain unsupported until an adapter is implemented.

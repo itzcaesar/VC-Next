@@ -64,7 +64,7 @@ def main() -> int:
     parser.add_argument("--index")
     parser.add_argument(
         "--contentvec",
-        help="Optional explicit ContentVec/Rinna Hubert ONNX asset; otherwise discover it from the package.",
+        help="Optional explicit ContentVec .onnx or Fairseq HuBERT .pt/.pth feature embedder; otherwise discover ContentVec from the package.",
     )
     parser.add_argument(
         "--rmvpe",

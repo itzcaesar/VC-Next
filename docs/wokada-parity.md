@@ -28,7 +28,7 @@ rules and test evidence below belong to VC Next.
 | Feature-rate audio | Per-hop `resampy` `kaiser_fast` to 16 kHz | Same filter and per-hop v2 feature history |
 | RVC v2 hop | 160 samples at 16 kHz | Same rounded `convertSize` geometry |
 | Extra/context | `extraConvertSize` front context before the current output candidate | Same explicit front context; effective retained window is derived from `convertSize` rounding |
-| Content features | ContentVec, then 2× interpolation | Same |
+| Content features | ContentVec (or Fairseq HuBERT fallback), then 2× interpolation | ContentVec by default; explicit Fairseq HuBERT `.pt/.pth` is also supported |
 | RMVPE front context | Analyze the post-front tail; restore zero F0 frames | Same trim-and-restore boundary |
 | Retrieval | FAISS nearest vector, `k=1` | Same; index dimension is validated before load |
 | Retrieval front restore | Reuse the rolling post-inference feature buffer before the current tail | Same rolling buffer, including zero rows for each new live hop |
@@ -100,9 +100,9 @@ model, index, or processing settings.
 
 Check the following in order:
 
-1. Confirm the same ContentVec asset (`contentvec-f.onnx`) and RMVPE asset are
-   selected. A different Hubert/ContentVec variant changes the voice even with
-   the same checkpoint.
+1. Confirm the same feature asset (`contentvec-f.onnx` or the explicit Fairseq
+   `hubert_base.pt`) and RMVPE asset are selected. A different
+   Hubert/ContentVec variant changes the voice even with the same checkpoint.
 2. Confirm pitch shift, index ratio, protection, speaker ID, and RMVPE threshold.
 3. Confirm the paired `.index` file is loaded and its dimension matches the
    checkpoint (v2 models normally use 768 channels).
@@ -114,3 +114,18 @@ Check the following in order:
 
 This separation keeps model-quality changes measurable and prevents audio-driver
 artifacts from being mistaken for neural-model differences.
+
+## Fairseq HuBERT comparison on the RTX 4050 reference machine
+
+The same real `e-girl_e350_s42700.pth` checkpoint, paired 768-dimensional
+`.index`, RMVPE asset, and input fixture were run through both feature backends.
+After warm-up, both paths produced finite output and met the Balanced 500 ms
+chunk deadline. The direct feature comparison over the same 54-frame window
+reported cosine similarity `0.999999`, mean absolute feature delta `0.000299`,
+and identical feature RMS (`0.316219`). This indicates that the earlier quality
+difference was not caused by a missing HuBERT fallback alone; remaining audible
+differences should be investigated through pitch settings, index/protection,
+Chunk/Extra geometry, stitching, and device routing.
+
+Fairseq initialization was slower on this machine (about 3.6 s versus 3.3 s for
+the ONNX feature pipeline), so ContentVec ONNX remains the recommended default.

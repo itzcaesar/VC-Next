@@ -20,7 +20,11 @@ sys.path.insert(0, str(ENGINE_ROOT))
 import torch  # noqa: E402,F401
 
 from vc_next_sidecar.rvc_compat.loader import _onnx_sample_rate, load_onnx_generator  # noqa: E402
-from vc_next_sidecar.rvc_compat.offline import OnnxFeaturePipeline, _select_content_output  # noqa: E402
+from vc_next_sidecar.rvc_compat.offline import (  # noqa: E402
+    OnnxFeaturePipeline,
+    _select_content_output,
+    load_feature_pipeline,
+)
 
 
 class _FakeInput:
@@ -97,6 +101,18 @@ class OnnxLoaderTests(unittest.TestCase):
         self.assertEqual(session.waveform.shape, (1, 320))
         self.assertAlmostEqual(float(session.threshold[0]), 0.30, places=6)
         self.assertEqual(result.tolist(), [0.0, 120.0, 121.0, 122.0])
+
+    def test_feature_pipeline_dispatches_hubert_checkpoints_explicitly(self) -> None:
+        with patch("vc_next_sidecar.rvc_compat.offline.OnnxFeaturePipeline") as onnx:
+            onnx_result = load_feature_pipeline("voice.onnx", "rmvpe.onnx", feature_channels=768)
+            onnx.assert_called_once_with(str(Path("voice.onnx").resolve()), "rmvpe.onnx", feature_channels=768)
+
+        with patch("vc_next_sidecar.rvc_compat.offline.FairseqHubertFeaturePipeline") as hubert:
+            hubert_result = load_feature_pipeline("hubert_base.pt", "rmvpe.onnx", feature_channels=768)
+            hubert.assert_called_once_with(str(Path("hubert_base.pt").resolve()), "rmvpe.onnx", feature_channels=768)
+
+        self.assertIs(onnx_result, onnx.return_value)
+        self.assertIs(hubert_result, hubert.return_value)
 
     def _fake_runtime(self, *, missing_feats: bool = False):
         class SessionOptions:

@@ -14,6 +14,7 @@ PACKAGE_CANDIDATES: dict[str, tuple[str, ...]] = {
     "torchaudio": ("torchaudio",),
     "onnxruntime": ("onnxruntime-gpu", "onnxruntime"),
     "faiss": ("faiss-gpu", "faiss-cpu"),
+    "fairseq": ("fairseq",),
     "soundfile": ("soundfile",),
     "resampy": ("resampy",),
 }
@@ -120,6 +121,7 @@ def probe_runtime() -> dict[str, Any]:
             "trusted-checkpoint-inspection",
             "offline-rvc-conversion",
             "faiss-index-retrieval" if packages["faiss"] else "index-retrieval-unavailable",
+            "fairseq-hubert" if packages["fairseq"] else "contentvec-onnx-only",
             "onnx-cuda-provider" if onnx_runtime["cudaProviderAvailable"] else "onnx-cpu-only",
             "versioned-stdio-control",
         ],

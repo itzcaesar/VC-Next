@@ -1918,12 +1918,13 @@ function App() {
       const selected = await open({
         multiple: false,
         directory: false,
-        title: "Select the optional ContentVec embedder (.onnx)",
-        filters: [{ name: "ONNX embedders", extensions: ["onnx"] }],
+        title: "Select a feature embedder (.onnx or .pt)",
+        filters: [{ name: "ContentVec or HuBERT embedders", extensions: ["onnx", "pt", "pth"] }],
       });
       if (typeof selected !== "string") return;
-      if (!selected.toLocaleLowerCase().endsWith(".onnx")) {
-        throw new Error("Choose a valid .onnx embedder file.");
+      const extension = selected.toLocaleLowerCase();
+      if (!(extension.endsWith(".onnx") || extension.endsWith(".pt") || extension.endsWith(".pth"))) {
+        throw new Error("Choose a valid ContentVec (.onnx) or Fairseq HuBERT (.pt/.pth) embedder file.");
       }
       setModelPackage((current) => ({ ...current, embedderPath: selected }));
     } catch (error) {
@@ -2265,7 +2266,8 @@ function App() {
                 <div className="advanced-panel">
                   <div><span>Retrieval strength</span><strong>{selectedModelHasIndex ? `${indexRate}% ${selectedModelLoaded && !selectedModelNeedsReload ? "loaded" : "on next load"}` : "No index available"}</strong></div>
                   <label className="advanced-select"><span>Index file</span><select aria-label="Index file" value={selectedSettings.indexPath ?? ""} disabled={running || !selectedModel.indexPaths?.length} onChange={(event) => updateSelectedSettings({ indexPath: event.target.value || null })}><option value="">{selectedModel.indexPaths?.length ? "Off" : "No index available"}</option>{selectedModel.indexPaths?.map((path) => <option key={path} value={path}>{windowsFileName(path)}</option>)}</select></label>
-                  <div><span>Content embedder</span><strong>{selectedSettings.contentvecPath ? windowsFileName(selectedSettings.contentvecPath) : "Auto-discover ContentVec"}</strong></div>
+                  <div><span>Feature embedder</span><strong>{selectedSettings.contentvecPath ? windowsFileName(selectedSettings.contentvecPath) : "Auto-discover ContentVec"}</strong></div>
+                  {selectedModelLoaded && <div><span>Active feature backend</span><strong>{liveRvcStatus.featureBackend === "fairseq-hubert" ? "Fairseq HuBERT (CUDA)" : liveRvcStatus.featureBackend === "contentvec-onnx" ? "ContentVec ONNX (CUDA)" : liveRvcStatus.featureBackend ?? "Pending"}</strong></div>}
                   <label className="advanced-select"><span>Target speaker</span><select aria-label="Target speaker" value={selectedSettings.speakerId} disabled={running || !selectedModelLoaded || (liveRvcStatus.speakerCount ?? 1) <= 1} onChange={(event) => updateSelectedSettings({ speakerId: Number(event.target.value) })}>{Array.from({ length: Math.max(1, liveRvcStatus.speakerCount ?? 1) }, (_, speakerId) => <option key={speakerId} value={speakerId}>Speaker {speakerId}</option>)}</select></label>
                   <label className="advanced-range"><span>RMVPE threshold <output>{selectedSettings.f0Threshold.toFixed(2)}</output></span><input aria-label="RMVPE threshold" type="range" min="1" max="99" value={Math.round(selectedSettings.f0Threshold * 100)} disabled={running} style={{ "--range-progress": `${((selectedSettings.f0Threshold - 0.01) / 0.98) * 100}%` } as CSSProperties} onChange={(event) => updateSelectedSettings({ f0Threshold: Number(event.target.value) / 100 })} /></label>
                   <label className="advanced-select"><span>Chunk / streaming hop</span><select aria-label="Chunk size" value={selectedSettings.chunkFrames} disabled={running} onChange={(event) => updateSelectedSettings({ chunkFrames: Number(event.target.value) })}>{CHUNK_OPTIONS.map((frames) => <option key={frames} value={frames}>{frameDurationLabel(frames)}</option>)}</select></label>
@@ -2380,6 +2382,7 @@ function App() {
               <div><dt>Current stage</dt><dd>{running ? engineStatus.inferenceBackend : selectedModelLoaded ? "RVC warmed" : "RVC pending"}</dd></div>
               <div><dt>Generator backend</dt><dd>{liveRvcStatus.state === "ready" ? `${liveRvcStatus.backend === "onnx" ? "ONNX" : "PyTorch"} · ${liveRvcStatus.device ?? "unknown device"}` : "Not loaded"}</dd></div>
               <div><dt>Generator providers</dt><dd>{liveRvcStatus.generatorProviders?.join(" / ") || (liveRvcStatus.state === "ready" ? "PyTorch CUDA" : "Not loaded")}</dd></div>
+              <div><dt>Feature backend</dt><dd>{liveRvcStatus.state === "ready" ? (liveRvcStatus.featureBackend === "fairseq-hubert" ? "Fairseq HuBERT · CUDA" : liveRvcStatus.featureBackend === "contentvec-onnx" ? "ContentVec · ONNX CUDA" : liveRvcStatus.featureBackend ?? "Unknown") : "Not loaded"}</dd></div>
               <div><dt>Model worker</dt><dd>{liveRvcStatus.workerState === "recovering" ? "Recovering" : liveRvcStatus.workerState === "failed" ? "Recovery failed" : liveRvcStatus.state === "ready" ? "Resident" : "Not loaded"}</dd></div>
               <div><dt>Worker restarts</dt><dd>{liveRvcStatus.workerRestarts ?? 0}</dd></div>
               <div><dt>Retrieval index</dt><dd>{liveRvcStatus.indexLoaded ? `${liveRvcStatus.indexVectorCount?.toLocaleString()} vectors` : "Not loaded"}</dd></div>
@@ -2554,9 +2557,9 @@ function App() {
             </section>
 
             <section className={`model-package-card ${modelPackage.embedderPath ? "complete" : ""}`} aria-labelledby="embedder-list-title">
-              <div className="model-package-card-heading"><div><span className="package-step">3</span><div><h3 id="embedder-list-title">ContentVec embedder</h3><p>Optional · .onnx</p></div></div><span className="package-optional">Optional</span></div>
+              <div className="model-package-card-heading"><div><span className="package-step">3</span><div><h3 id="embedder-list-title">Feature embedder</h3><p>Optional · ContentVec .onnx or Fairseq HuBERT .pt</p></div></div><span className="package-optional">Optional</span></div>
               <div className="package-file-list">
-                {modelPackage.embedderPath ? <button type="button" className="package-file-row selected" onClick={selectModelEmbedder} disabled={Boolean(modelPackageBusy)}><span className="package-file-icon">ONNX</span><span><strong>{windowsFileName(modelPackage.embedderPath)}</strong><small>Explicit embedder path</small></span><span className="package-file-state">Selected</span></button> : <div className="package-empty"><strong>Auto-discover enabled</strong><small>Leave empty to use the runtime default.</small></div>}
+                {modelPackage.embedderPath ? <button type="button" className="package-file-row selected" onClick={selectModelEmbedder} disabled={Boolean(modelPackageBusy)}><span className="package-file-icon">FEAT</span><span><strong>{windowsFileName(modelPackage.embedderPath)}</strong><small>Explicit feature embedder path</small></span><span className="package-file-state">Selected</span></button> : <div className="package-empty"><strong>Auto-discover enabled</strong><small>Leave empty to use the runtime default.</small></div>}
               </div>
               <div className="package-card-actions"><button type="button" className="package-select-button" onClick={selectModelEmbedder} disabled={Boolean(modelPackageBusy) || !modelPackage.inspection}>{modelPackageBusy === "embedder" ? "Choosing…" : modelPackage.embedderPath ? "Replace embedder" : "Choose embedder"}</button>{modelPackage.embedderPath && <button type="button" className="package-clear-button" onClick={() => setModelPackage((current) => ({ ...current, embedderPath: null }))} disabled={Boolean(modelPackageBusy)}>Auto-discover</button>}</div>
             </section>

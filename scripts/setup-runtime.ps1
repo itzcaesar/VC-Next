@@ -3,6 +3,7 @@ param(
     [string]$VenvDirectory = "",
     [switch]$SkipTorch,
     [switch]$SkipOptional,
+    [switch]$InstallHubert,
     [switch]$ForceRecreate
 )
 
@@ -121,6 +122,13 @@ if (-not $SkipTorch) {
 }
 if (-not $SkipOptional) {
     Invoke-Checked "Installing ONNX Runtime GPU" $venvPython @("-m", "pip", "install", "-r", (Join-Path $enginePath "requirements-rvc-optional.txt"))
+}
+if ($InstallHubert) {
+    # Fairseq 0.12.2 predates Python 3.11 and publishes incompatible Hydra /
+    # OmegaConf upper bounds. Install the package without dependency solving,
+    # then use the explicitly tested compatibility set from the repository.
+    Invoke-Checked "Installing Fairseq HuBERT dependencies" $venvPython @("-m", "pip", "install", "-r", (Join-Path $enginePath "requirements-rvc-hubert.txt"))
+    Invoke-Checked "Installing Fairseq 0.12.2 compatibility package" $venvPython @("-m", "pip", "install", "--no-deps", "--no-build-isolation", "fairseq==0.12.2")
 }
 
 $probeRequest = '{"protocolVersion":1,"requestId":"setup","method":"probe_runtime","params":{}}'

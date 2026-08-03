@@ -22,7 +22,11 @@ from .framed_protocol import (
 )
 from .model_probe import model_package_defaults
 from .rvc_compat.loader import LoadedGenerator, load_generator, load_onnx_generator
-from .rvc_compat.offline import OnnxFeaturePipeline, _run_generator
+from .rvc_compat.offline import (
+    OnnxFeaturePipeline,
+    _run_generator,
+    load_feature_pipeline,
+)
 from .rvc_compat.retrieval import (
     FaissFeatureIndex,
     validate_index_ratio,
@@ -75,6 +79,12 @@ def discover_feature_models(model_path: str, embedder_hint: str | None = None) -
         "rinna_hubert_base-f.onnx",
         "rinna_hubert_base.onnx",
     )
+    fairseq_hubert_names = (
+        "hubert_base.pt",
+        "hubert_base.pth",
+        "hubert_base_l12.pt",
+        "hubert_base_l12.pth",
+    )
     hint = (embedder_hint or "").casefold()
     if "rinna_hubert" in hint:
         preferred_contentvec_names = (
@@ -120,11 +130,17 @@ def discover_feature_models(model_path: str, embedder_hint: str | None = None) -
                 *(modules / folder / name for folder in contentvec_folders for name in preferred_contentvec_names),
                 *(modules / name for name in preferred_contentvec_names),
             )
+            fairseq_candidates = (
+                *(modules / folder / name for folder in ("contentvec", "hubert") for name in fairseq_hubert_names),
+                *(modules / name for name in fairseq_hubert_names),
+            )
             rmvpe_candidates = (
                 *(modules / "rmvpe" / name for name in rmvpe_names),
                 *(modules / name for name in rmvpe_names),
             )
             contentvec = next((path for path in contentvec_candidates if path.is_file()), None)
+            if contentvec is None:
+                contentvec = next((path for path in fairseq_candidates if path.is_file()), None)
             rmvpe = next((path for path in rmvpe_candidates if path.is_file()), None)
             if contentvec and rmvpe:
                 return str(contentvec), str(rmvpe)
@@ -136,9 +152,11 @@ def discover_feature_models(model_path: str, embedder_hint: str | None = None) -
         for candidate in (
             *(modules / folder / name for folder in contentvec_folders for name in preferred_contentvec_names),
             *(modules / name for name in preferred_contentvec_names),
+            *(modules / folder / name for folder in ("contentvec", "hubert") for name in fairseq_hubert_names),
+            *(modules / name for name in fairseq_hubert_names),
         )
     ):
-        missing.append("ContentVec (.onnx)")
+        missing.append("ContentVec/Fairseq HuBERT feature embedder (.onnx/.pt)")
     if not any(
         Path(candidate).is_file()
         for root in (model.parent, *model.parents)
@@ -151,9 +169,9 @@ def discover_feature_models(model_path: str, embedder_hint: str | None = None) -
         missing.append("RMVPE (.onnx)")
     searched_display = "; ".join(dict.fromkeys(searched))
     raise ValueError(
-        "ContentVec and RMVPE assets were not found above the selected model. "
+        "Feature embedder and RMVPE assets were not found above the selected model. "
         f"Missing: {', '.join(missing) or 'unknown asset'}. "
-        "Import from a w-okada model_dir or choose an explicit embedder; "
+        "Import from a w-okada model_dir or choose an explicit feature embedder; "
         f"searched: {searched_display}"
     )
 
@@ -216,6 +234,7 @@ class LiveRvcProcessor:
         self.retrieval_index: FaissFeatureIndex | None = None
         self.model_path: str | None = None
         self.contentvec_path: str | None = None
+        self.feature_backend = "contentvec-onnx"
         self.rmvpe_path: str | None = None
         self.pitch_shift = 0.0
         self.speaker_id = 0
@@ -312,6 +331,8 @@ class LiveRvcProcessor:
             "protocolVersion": PROTOCOL_VERSION,
             "modelPath": self.model_path,
             "contentvecPath": self.contentvec_path,
+            "featurePath": self.contentvec_path,
+            "featureBackend": self.feature_backend,
             "rmvpePath": self.rmvpe_path,
             "indexPath": self.retrieval_index.path if self.retrieval_index else None,
             "indexLoaded": self.retrieval_index is not None,
@@ -422,7 +443,7 @@ class LiveRvcProcessor:
         contentvec = Path(str(contentvec_path)).expanduser().resolve()
         rmvpe = Path(str(rmvpe_path)).expanduser().resolve()
         if not contentvec.is_file():
-            raise ValueError(f"ContentVec embedder was not found: {contentvec}")
+            raise ValueError(f"Feature embedder was not found: {contentvec}")
         if not rmvpe.is_file():
             raise ValueError(f"RMVPE model was not found: {rmvpe}")
 
@@ -439,10 +460,15 @@ class LiveRvcProcessor:
             if Path(model_path).suffix.lower() == ".onnx"
             else load_generator(model_path)
         )
-        features = OnnxFeaturePipeline(
+        features = load_feature_pipeline(
             str(contentvec),
             str(rmvpe),
             feature_channels=loaded.feature_channels,
+        )
+        feature_backend = (
+            "fairseq-hubert"
+            if contentvec.suffix.casefold() in {".pt", ".pth"}
+            else "contentvec-onnx"
         )
         retrieval_index = (
             FaissFeatureIndex.load(index_path, loaded.feature_channels)
@@ -463,6 +489,7 @@ class LiveRvcProcessor:
         candidate.retrieval_index = retrieval_index
         candidate.model_path = loaded.model_path
         candidate.contentvec_path = str(contentvec)
+        candidate.feature_backend = feature_backend
         candidate.rmvpe_path = str(rmvpe)
         candidate.pitch_shift = pitch_shift
         candidate.speaker_id = speaker_id
@@ -501,6 +528,7 @@ class LiveRvcProcessor:
         self.retrieval_index = None
         self.model_path = None
         self.contentvec_path = None
+        self.feature_backend = "contentvec-onnx"
         self.rmvpe_path = None
         self.pitch_shift = 0.0
         self.speaker_id = 0

@@ -212,6 +212,8 @@ export interface LiveRvcStatus {
   protocolVersion: number;
   modelPath: string | null;
   contentvecPath?: string | null;
+  featurePath?: string | null;
+  featureBackend?: "contentvec-onnx" | "fairseq-hubert" | string | null;
   rmvpePath?: string | null;
   indexPath?: string | null;
   indexLoaded?: boolean;
@@ -375,6 +377,9 @@ export const EMPTY_LIVE_RVC_STATUS: LiveRvcStatus = {
   state: "empty",
   protocolVersion: 1,
   modelPath: null,
+  contentvecPath: null,
+  featurePath: null,
+  featureBackend: "contentvec-onnx",
   sampleRate: 48_000,
   chunkFrames: 9_600,
   chunkMilliseconds: 200,
@@ -627,8 +632,8 @@ export async function chooseAndInspectRvcPackage(): Promise<RvcModelPackageSelec
   const selectedEmbedder = await open({
     multiple: false,
     directory: false,
-    title: "Select the ContentVec embedder (Cancel to auto-discover)",
-    filters: [{ name: "ONNX embedders", extensions: ["onnx"] }],
+    title: "Select a feature embedder (Cancel to auto-discover)",
+    filters: [{ name: "ContentVec or HuBERT embedders", extensions: ["onnx", "pt", "pth"] }],
   });
   return {
     inspection,
