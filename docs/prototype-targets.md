@@ -116,6 +116,15 @@ A recorder helper can capture a selected cable endpoint at its native sample
 rate, but a repeatable nonzero converted WAV is still required before claiming
 end-to-end speech quality parity.
 
+A direct split-rate Cable A invocation (`CABLE-A Output` at 44.1 kHz into the
+48 kHz native route) also produced a nonzero converted peak in one run: 812
+native callbacks, max input peak `0.30697`, max output peak `0.13292`, zero
+missed deadlines, zero queue drops, and zero underruns. Repeating the same
+command and recording `CABLE-A Output` independently later returned an
+all-zero graph. The speech harness now waits for its fixture stream and offers
+`-RequireSignal` so an acceptance run fails instead of treating that
+intermittent cable state as a passing conversion result.
+
 The current realtime worker soak then ran the same paired checkpoint for 120
 wall-clock seconds (600 Balanced hops). It produced finite output for every hop,
 kept the worker healthy, and recorded 0 deadline misses with P50 91.2 ms, P95

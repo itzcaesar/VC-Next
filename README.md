@@ -436,6 +436,21 @@ The helper writes a mono WAV plus a JSON summary to stdout. A zero peak means
 the selected input endpoint is open but silent; check the VoiceMeeter bus and
 the app's **No input signal detected** warning before changing model settings.
 
+For the native speech harness, add `-RequireSignal` to make the run fail when
+the fixture bus or selected input/output endpoints stay silent. The harness
+waits for the fixture stream to open first; omit the switch only for deliberate
+idle-input tests:
+
+```powershell
+npm run validate:native-speech -- `
+  -ModelPath "C:\path\to\voice.pth" `
+  -FixturePath "C:\path\to\speech.wav" `
+  -InputDevice "CABLE-A Output (VB-Audio Cable A)" `
+  -FixtureOutputDevice "CABLE-A Input (VB-Audio Cable A)" `
+  -OutputDevice "CABLE-B Input (VB-Audio Cable B)" `
+  -RequireSignal -MinimumPeak 0.005
+```
+
 To exercise the actual native Windows route used by the Tauri host, use the
 native validation binary. It enumerates CPAL/WASAPI endpoints, loads the paired
 checkpoint and index, starts native input/output/optional monitor streams, and

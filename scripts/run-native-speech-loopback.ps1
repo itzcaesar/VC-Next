@@ -16,6 +16,8 @@ param(
     [int]$ExtraFrames = 24000,
     [ValidateSet("quality", "balanced", "latency")]
     [string]$Preset = "balanced",
+    [switch]$RequireSignal,
+    [double]$MinimumPeak = 0.005,
     [string]$ReportPath = "outputs\native-speech-loopback.json"
 )
 
@@ -46,6 +48,10 @@ $reportFullPath = if ([System.IO.Path]::IsPathRooted($ReportPath)) {
 }
 New-Item -ItemType Directory -Path (Split-Path -Parent $reportFullPath) -Force | Out-Null
 $playerSeconds = [Math]::Max($Seconds + 20, 30)
+$readyFile = "$reportFullPath.player.ready.json"
+if (Test-Path -LiteralPath $readyFile -PathType Leaf) {
+    Remove-Item -LiteralPath $readyFile -Force
+}
 # Start-Process receives a single Windows command line.  Passing an array here
 # silently drops the grouping around paths/device names that contain spaces,
 # which made the fixture process fail before it opened the cable.
@@ -56,16 +62,27 @@ $playerArgs = @(
     (Quote-ProcessArgument "engine-python\tools\playback_fixture.py"),
     "--input", (Quote-ProcessArgument $fixture),
     "--device", (Quote-ProcessArgument $FixtureOutputDevice),
-    "--seconds", (Quote-ProcessArgument ([string]$playerSeconds))
+    "--seconds", (Quote-ProcessArgument ([string]$playerSeconds)),
+    "--ready-file", (Quote-ProcessArgument $readyFile)
 ) -join " "
 $playerStdout = Join-Path $repoRoot "outputs\native-speech-loopback-player.stdout.txt"
 $playerStderr = Join-Path $repoRoot "outputs\native-speech-loopback-player.stderr.txt"
 $player = Start-Process -FilePath $python -ArgumentList $playerArgs -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $playerStdout -RedirectStandardError $playerStderr
 
 try {
-    # Give PortAudio a moment to open the virtual output before the native
-    # validator starts its model warm-up.
-    Start-Sleep -Milliseconds 500
+    # Wait for the fixture stream to open before the native validator starts
+    # its model warm-up. A fixed sleep hid player/device failures as silence.
+    $readyDeadline = (Get-Date).AddSeconds(8)
+    while (-not (Test-Path -LiteralPath $readyFile -PathType Leaf)) {
+        if ($player.HasExited) {
+            $playerError = if (Test-Path -LiteralPath $playerStderr) { Get-Content -LiteralPath $playerStderr -Raw } else { "" }
+            throw "The fixture player exited before opening $FixtureOutputDevice. $playerError"
+        }
+        if ((Get-Date) -ge $readyDeadline) {
+            throw "The fixture player did not open $FixtureOutputDevice within 8 seconds."
+        }
+        Start-Sleep -Milliseconds 100
+    }
     $nativeArgs = @(
         "--model", $model,
         "--input", $InputDevice,
@@ -94,5 +111,13 @@ try {
 
 if (-not (Test-Path -LiteralPath $reportFullPath -PathType Leaf)) {
     throw "The native speech loopback did not produce a report: $reportFullPath"
+}
+if ($RequireSignal) {
+    $nativeReport = Get-Content -LiteralPath $reportFullPath -Raw | ConvertFrom-Json
+    $inputPeak = [double]($nativeReport.maxInputPeak ?? 0)
+    $outputPeak = [double]($nativeReport.maxOutputPeak ?? 0)
+    if ($inputPeak -lt $MinimumPeak -or $outputPeak -lt $MinimumPeak) {
+        throw "The speech route was silent (max input peak $inputPeak, max output peak $outputPeak; minimum $MinimumPeak). Check the fixture bus and selected endpoints. Report: $reportFullPath"
+    }
 }
 Write-Host "Native speech loopback report: $reportFullPath"

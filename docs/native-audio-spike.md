@@ -311,12 +311,17 @@ npm run validate:native-speech -- `
   -InputDevice "CABLE-A Output (VB-Audio Cable A)" `
   -FixtureOutputDevice "CABLE-A Input (VB-Audio Cable A)" `
   -OutputDevice "CABLE-B Input (VB-Audio Cable B)" `
-  -Seconds 12 -Preset balanced `
+  -Seconds 12 -Preset balanced -RequireSignal `
   -ReportPath outputs\native-speech-loopback.json
 ```
 
 The fixture helper resolves duplicate Windows endpoint names to the WASAPI
-instance instead of failing on the MME/DirectSound/WASAPI name collision. The
+instance instead of failing on the MME/DirectSound/WASAPI name collision, and
+the harness waits for the fixture output stream's ready marker before loading
+the model. `-RequireSignal` makes a speech acceptance run fail when either
+the maximum captured input or converted output peak is below `-MinimumPeak`
+(0.005 by default), rather than silently passing an all-zero graph. Omit that
+switch for intentional idle/silence tests. The
 RTX 4050 `e-girl_e350_s42700.pth` plus its matching 62,851-vector index has
 passed the persistent-worker soak with CUDA execution, a healthy worker, and
 zero missed deadlines. The native route's idle and monitor-fallback checks also

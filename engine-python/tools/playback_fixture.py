@@ -57,6 +57,7 @@ def play_fixture(
     device: str,
     seconds: float,
     sample_rate: int = 48_000,
+    ready_file: str | Path | None = None,
 ) -> dict[str, object]:
     if seconds <= 0:
         raise ValueError("seconds must be positive")
@@ -80,6 +81,21 @@ def play_fixture(
         channels=1,
         device=output_device,
     ) as stream:
+        if ready_file is not None:
+            ready_path = Path(ready_file)
+            ready_path.parent.mkdir(parents=True, exist_ok=True)
+            ready_path.write_text(
+                json.dumps(
+                    {
+                        "device": device,
+                        "selectedDevice": str(output_device),
+                        "sampleRate": sample_rate,
+                        "openedAt": time.time(),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
         while written < total_frames:
             count = min(block_frames, total_frames - written)
             end = cursor + count
@@ -109,12 +125,17 @@ def main() -> int:
     parser.add_argument("--input", required=True)
     parser.add_argument("--device", required=True)
     parser.add_argument("--seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--ready-file",
+        help="Write a small JSON marker after the output stream opens.",
+    )
     args = parser.parse_args()
     try:
         result = play_fixture(
             input_path=args.input,
             device=args.device,
             seconds=args.seconds,
+            ready_file=args.ready_file,
         )
     except Exception as error:
         print(json.dumps({"ok": False, "error": str(error)}, indent=2))
