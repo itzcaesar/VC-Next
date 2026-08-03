@@ -33,6 +33,7 @@ This machine is a development reference, not a minimum-system specification.
 | 32/40/48 kHz checkpoint support | Complete for tested fixtures | Generator output normalized to 48 kHz live audio |
 | Worker recovery | Complete for transport failures | Timeouts, restart, model/settings replay, health telemetry |
 | Device-loss handling | Complete for prototype | Running-session endpoint watcher, actionable error, explicit stream restart |
+| Callback-error recovery | Complete for prototype | A distinct CPAL stream error triggers one delayed native route restart, bounded to three attempts and shared with device-loss recovery |
 | Audio clock stabilization | Complete for prototype | Adaptive priming and bounded drop/repeat correction |
 | Per-model stream calibration | Complete for prototype | Measures three steady-state calls for all profiles, guards against p95/max spikes, and recommends a stable Chunk/Extra pair |
 | Reference validation report | Complete for prototype | Runtime probe, real-model smoke, optional endpoint loopback, and optional converted-worker soak in one report |
@@ -69,7 +70,7 @@ This machine is a development reference, not a minimum-system specification.
 - Playback adapts its safety target after underruns.
 - Output and Monitor clocks expose independent correction counters.
 - The Python worker can restart and restore a resident model/settings contract.
-- Device disappearance is detected while a session is live; recovery remains explicit so a stale CPAL stream is never silently rebound to a different endpoint.
+- Device disappearance is detected while a session is live; recovery remains explicit so a stale CPAL stream is never silently rebound to a different endpoint. A distinct CPAL callback error also triggers a bounded delayed restart while the selected endpoint is still present.
 - Input cleanup runs in the native callback path: DC/high-pass filtering, adaptive stationary-noise suppression, noise gating, output limiting, and conservative far-end echo control.
 - Calibration measures the loaded model without changing the user’s current stream profile and can apply a measured profile from the UI.
 
@@ -184,6 +185,11 @@ This proves compute feasibility for that fixture. It does not establish total la
 The next milestone should produce a reproducible report containing:
 
 ### Loopback latency
+
+The in-app **Test routes** action only proves that CPAL can open and drive the
+selected output and Monitor callbacks. It deliberately does not claim that a
+downstream VB-CABLE, VoiceMeeter bus, Discord input, or other application route
+received the tone; those require the external loopback harness below.
 
 - At least 100 detected impulses per route/profile
 - P50, P95, minimum, maximum, and rejected detections

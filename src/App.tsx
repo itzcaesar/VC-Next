@@ -616,6 +616,7 @@ function App() {
   const [liveLogs, setLiveLogs] = useState<LiveLogEntry[]>([]);
   const liveLogIdRef = useRef(0);
   const deviceWatchSignatureRef = useRef("");
+  const audioErrorRecoverySignatureRef = useRef("");
   const recoveryInFlightRef = useRef(false);
   const recoveryAttemptRef = useRef(0);
   const [quickSetupOpen, setQuickSetupOpen] = useState(true);
@@ -842,6 +843,39 @@ function App() {
       window.clearInterval(interval);
     };
   }, [running, engineBusy, engineStatus.state, inputDeviceId, outputDeviceId, monitorDeviceId]);
+
+  useEffect(() => {
+    const callbackError = engineStatus.lastError?.trim() ?? "";
+    if (!running || !["passthrough", "rvc"].includes(engineStatus.state)) {
+      audioErrorRecoverySignatureRef.current = "";
+      return;
+    }
+    if (!callbackError) {
+      audioErrorRecoverySignatureRef.current = "";
+      return;
+    }
+    // CPAL can report a stream callback failure while Windows still lists the
+    // endpoint. The device watcher cannot detect that case, so recover once
+    // per distinct error after a short grace period. Keep the existing retry
+    // ceiling shared with device-loss recovery so a broken route does not
+    // create an endless restart loop.
+    if (
+      engineBusy
+      || recoveryInFlightRef.current
+      || audioErrorRecoverySignatureRef.current === callbackError
+      || recoveryAttemptRef.current >= 3
+    ) return;
+    audioErrorRecoverySignatureRef.current = callbackError;
+    appendLiveLog(`Audio callback error · ${callbackError}`, "error");
+    setNotice("Audio callback stopped responding. Reconnecting the route…");
+    const timer = window.setTimeout(() => {
+      if (engineBusy || recoveryInFlightRef.current || !running) return;
+      recoveryInFlightRef.current = true;
+      recoveryAttemptRef.current += 1;
+      void recoverAudioSession();
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [running, engineBusy, engineStatus.lastError, engineStatus.state]);
 
   useEffect(() => {
     if (!running || engineStatus.state !== "rvc") return;
@@ -1320,11 +1354,11 @@ function App() {
         setEngineError(`Output route test failed: ${result.outputError}`);
         appendLiveLog(`Output route test failed · ${result.outputError}`, "error");
       } else if (result.monitorError) {
-        setNotice("Output route passed; monitor route needs attention");
-        appendLiveLog(`Output route passed · monitor warning: ${result.monitorError}`, "warning");
+        setNotice("Output callback passed; monitor route needs attention");
+        appendLiveLog(`Output callback passed · monitor warning: ${result.monitorError}`, "warning");
       } else {
-        setNotice("Output and monitor routes passed the test tone");
-        appendLiveLog("Output and monitor routes passed the test tone", "success");
+        setNotice("Output and monitor callbacks passed the test tone");
+        appendLiveLog("Output and monitor callbacks passed the test tone", "success");
       }
     } catch (error) {
       setRouteTestResult(null);
@@ -2344,7 +2378,7 @@ function App() {
 
             {routeTestResult && <div className={`info-callout ${routeTestResult.outputError ? "error" : routeTestResult.monitorError ? "warning" : "success"}`} role="status">
               <span>{routeTestResult.outputError ? "!" : routeTestResult.monitorError ? "!" : "✓"}</span>
-              <p><strong>{routeTestResult.outputError ? "Output route needs attention." : routeTestResult.monitorError ? "Output passed; monitor needs attention." : "Audio routes passed."}</strong> {routeTestResult.outputError ?? routeTestResult.monitorError ?? `${routeTestResult.outputDeviceName}${routeTestResult.monitorDeviceName ? ` + ${routeTestResult.monitorDeviceName}` : ""} · ${routeTestResult.durationMs} ms test tone`}</p>
+              <p><strong>{routeTestResult.outputError ? "Output callback needs attention." : routeTestResult.monitorError ? "Output callback passed; monitor needs attention." : "Output callbacks passed."}</strong> {routeTestResult.outputError ?? routeTestResult.monitorError ?? `${routeTestResult.outputDeviceName}${routeTestResult.monitorDeviceName ? ` + ${routeTestResult.monitorDeviceName}` : ""} · ${routeTestResult.durationMs} ms test tone`} <small>Callback test only; a virtual-cable loopback or downstream app route is not measured here.</small></p>
             </div>}
 
             <div className="audio-processing-toggle">
