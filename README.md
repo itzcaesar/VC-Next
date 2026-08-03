@@ -277,7 +277,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 .\engine-python\.venv\Scripts\python.exe -m unittest discover -s engine-python\tests -p "test_*.py" -v
 ```
 
-The current working tree passes 34 Rust library tests, 31 native-route tests,
+The current working tree passes 35 Rust library tests, 32 native-route tests,
 80 Python tests, and the TypeScript/Vite production build. The runtime probe
 checks PyTorch CUDA and the ONNX Runtime CUDA provider before reporting RVC
 readiness, while the desktop diagnostics use a native NVIDIA/Windows GPU probe
@@ -478,9 +478,11 @@ npm run validate:native-speech -- `
   -RequireSignal -MinimumPeak 0.005
 ```
 
-The fixture player and recorder use shared WASAPI with automatic rate
-conversion, matching the production CPAL route when a 44.1 kHz cable endpoint
-feeds the fixed 48 kHz RVC path.
+The integrated speech harness uses a native CPAL/WASAPI fixture player and the
+same native route code as the desktop app. It resamples a WAV fixture to the
+selected output endpoint, so a 44.1 kHz cable capture can be tested against
+the fixed 48 kHz RVC path without relying on a separate PortAudio playback
+stack.
 
 To exercise the actual native Windows route used by the Tauri host, use the
 native validation binary. It enumerates CPAL/WASAPI endpoints, loads the paired
@@ -490,6 +492,12 @@ prints worker and callback telemetry:
 ```powershell
 # List exact endpoint IDs and names.
 npm run validate:native-route -- -List
+
+# Verify that a selected output reaches a selected return input.
+npm run validate:native-route -- -Loopback `
+  -InputDevice "CABLE-A Output (VB-Audio Cable A)" `
+  -OutputDevice "CABLE-A Input (VB-Audio Cable A)" `
+  -Seconds 2
 
 # Run a five-second real-model route. Use headphones or a virtual output.
 npm run validate:native-route -- `
@@ -578,6 +586,6 @@ See [Upstream assessment](docs/upstream-assessment.md) and [RVC compatibility pr
 
 ## Project status
 
-VC Next is under active development. Historical CABLE-A passthrough acceptance detected 100/100 impulses, but the current WASAPI-selected shared-rate probe returns 0/2 impulses with zero callback warnings on this machine; the app surfaces stalled and silent-input routes instead of hiding them. Audio setup includes a bounded output-callback test whose result is explicitly not treated as downstream cable loopback, plus automatic restart after a distinct CPAL callback error. The native route has passed an idle real-model run with zero output peak, XRuns, or inference deadline misses, and one VoiceMeeter Out B1 → CABLE-B speech run produced nonzero converted output with zero underruns and missed deadlines. That graph is not yet reproducible: later runs correctly reported an all-zero input when the VoiceMeeter bus was silent. The reference model directory's four paired `.pth + .index` voices (v1/v2, 32/40/48 kHz) now all load and pass seeded CUDA worker smoke tests, and its five exported ONNX voices pass seeded CUDA smoke with retrieval off when no matching `.index` exists. Index discovery ignores generic export markers such as `v2`, `40k`, and epoch fragments, so an unrelated neighboring index is not silently attached. The installed release sidecar has loaded the real paired checkpoint/index on CUDA, and a 120-second realtime Balanced soak completed with zero deadline misses. A repeatable recorded converted-speech loopback, two-hour acceptance matrix, signed distribution, and a built-in virtual-microphone strategy remain next.
+VC Next is under active development. Audio setup includes bounded output-callback and input/output loopback tests, automatic restart after a distinct CPAL callback error, and explicit silent-route diagnostics. The native CPAL fixture player now drives the same WASAPI path as the app: a 30-second Balanced run with the RTX 4050 reference `.pth + .index` voice produced nonzero input/output and far-end CABLE-B capture, with zero underruns, zero missed inference deadlines, and no callback warnings. An exported ONNX voice also passed a 10-second CUDA route run with retrieval disabled when no matching `.index` exists. The reference model directory's four paired `.pth + .index` voices (v1/v2, 32/40/48 kHz) all load and pass seeded CUDA worker smoke tests, and its five exported ONNX voices pass seeded CUDA smoke. Index discovery ignores generic export markers such as `v2`, `40k`, and epoch fragments, so an unrelated neighboring index is not silently attached. The installed release sidecar has loaded the real paired checkpoint/index on CUDA, and a 120-second realtime Balanced soak completed with zero deadline misses. A two-hour acceptance matrix, signed distribution, and a built-in virtual-microphone strategy remain next.
 
 If you are testing the alpha, useful reports include your Windows version, GPU and driver, model target rate, selected Chunk/Extra values, device routes, exported diagnostics, and whether the failure occurs during import, warm-up, or live audio.

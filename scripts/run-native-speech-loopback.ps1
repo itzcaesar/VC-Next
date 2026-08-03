@@ -35,10 +35,11 @@ if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
 }
 
 $native = Join-Path $repoRoot "src-tauri\target\debug\native-route-validation.exe"
-if (-not (Test-Path -LiteralPath $native -PathType Leaf)) {
+$nativePlayer = Join-Path $repoRoot "src-tauri\target\debug\native-fixture-playback.exe"
+if (-not (Test-Path -LiteralPath $native -PathType Leaf) -or -not (Test-Path -LiteralPath $nativePlayer -PathType Leaf)) {
     Push-Location $repoRoot
     try {
-        & cargo build --manifest-path src-tauri\Cargo.toml --features native-validation --bin native-route-validation
+        & cargo build --manifest-path src-tauri\Cargo.toml --features native-validation --bin native-route-validation --bin native-fixture-playback
         if ($LASTEXITCODE -ne 0) { throw "The native validation binary could not be built." }
     } finally {
         Pop-Location
@@ -109,15 +110,14 @@ if ($CaptureDevice) {
     $capture = Start-Process -FilePath $python -ArgumentList $captureArgs -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $captureStdout -RedirectStandardError $captureStderr
 }
 $playerArgs = @(
-    (Quote-ProcessArgument "engine-python\tools\playback_fixture.py"),
     "--input", (Quote-ProcessArgument $fixture),
-    "--device", (Quote-ProcessArgument $FixtureOutputDevice),
+    "--output", (Quote-ProcessArgument $FixtureOutputDevice),
     "--seconds", (Quote-ProcessArgument ([string]$playerSeconds)),
     "--ready-file", (Quote-ProcessArgument $readyFile)
 ) -join " "
 $playerStdout = Join-Path $repoRoot "outputs\native-speech-loopback-player.stdout.txt"
 $playerStderr = Join-Path $repoRoot "outputs\native-speech-loopback-player.stderr.txt"
-$player = Start-Process -FilePath $python -ArgumentList $playerArgs -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $playerStdout -RedirectStandardError $playerStderr
+$player = Start-Process -FilePath $nativePlayer -ArgumentList $playerArgs -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $playerStdout -RedirectStandardError $playerStderr
 
 try {
     if ($capture) {

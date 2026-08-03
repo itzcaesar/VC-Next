@@ -28,6 +28,11 @@ name = "native-route-validation"
 path = "src/bin/native-route-validation.rs"
 required-features = ["native-validation"]
 
+[[bin]]
+name = "native-fixture-playback"
+path = "src/bin/native-fixture-playback.rs"
+required-features = ["native-validation"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

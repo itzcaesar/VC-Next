@@ -315,24 +315,25 @@ npm run validate:native-speech -- `
   -ReportPath outputs\native-speech-loopback.json
 ```
 
-The fixture helper resolves duplicate Windows endpoint names to the WASAPI
-instance instead of failing on the MME/DirectSound/WASAPI name collision, and
-the harness waits for the fixture output stream's ready marker before loading
-the model. `-RequireSignal` makes a speech acceptance run fail when either
-the maximum captured input or converted output peak is below `-MinimumPeak`
-(0.005 by default), rather than silently passing an all-zero graph. Omit that
-switch for intentional idle/silence tests. The
-fixture player and recorder explicitly use shared WASAPI with automatic rate
-conversion, matching the production CPAL route when a 44.1 kHz cable endpoint
-feeds the fixed 48 kHz RVC path. The
+The harness waits for the native CPAL fixture player's ready marker before
+loading the model. `-RequireSignal` makes a speech acceptance run fail when
+either the maximum captured input or converted output peak is below
+`-MinimumPeak` (0.005 by default), rather than silently passing an all-zero
+graph. Omit that switch for intentional idle/silence tests. Fixture playback
+now uses a small native CPAL/WASAPI player and resamples the WAV fixture to the
+selected output endpoint, matching the production audio stack instead of
+depending on a separate PortAudio playback path. The recorder still opens at
+the endpoint's own rate, so a 44.1 kHz cable capture can validate the fixed
+48 kHz RVC path. The
 RTX 4050 `e-girl_e350_s42700.pth` plus its matching 62,851-vector index has
 passed the persistent-worker soak with CUDA execution, a healthy worker, and
 zero missed deadlines. The native route's idle and monitor-fallback checks also
-complete without output underruns or inference deadline misses. The current
-machine's CABLE-A playback/capture pairing did not deliver the fixture to the
-capture endpoint, however, so this harness is intentionally still marked
-pending for converted-speech acceptance; a non-zero worker or fixture result
-must not be mistaken for end-to-end device loopback proof.
+complete without output underruns or inference deadline misses. A 30-second
+Balanced run using the native fixture player and the paired RTX 4050 voice
+produced nonzero CABLE-A input, converted CABLE-B output, and far-end capture
+with zero output underruns, zero missed inference deadlines, and no callback
+warnings. An exported ONNX voice also passed the same route with CUDA
+execution and retrieval disabled when no companion index was supplied.
 
 The harness can now own the far-end recorder so the timing window is
 deterministic. Add `-CaptureDevice` and an output path; the recorder opens
@@ -362,6 +363,20 @@ capture peak means the downstream graph is silent; inspect the cable or
 VoiceMeeter bus before changing RVC settings.
 When no `.index` is provided, the PowerShell wrapper sets retrieval to zero so
 exported ONNX voices without a companion index can still be validated.
+
+For setup-only route discovery, the same native binary exposes a short
+input/output loopback probe. It emits a bounded CPAL tone and reports whether
+the selected return input received it:
+
+```powershell
+npm run validate:native-route -- -Loopback `
+  -InputDevice "CABLE-A Output (VB-Audio Cable A)" `
+  -OutputDevice "CABLE-A Input (VB-Audio Cable A)" `
+  -Seconds 2
+```
+
+The desktop **Test loopback** button uses this command's native implementation
+directly and is separate from the output-only callback test.
 
 To capture the far side of a virtual cable for inspection, use the diagnostic
 recorder at the endpoint's own Windows sample rate. For example, Cable B's

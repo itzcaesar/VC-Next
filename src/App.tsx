@@ -25,9 +25,11 @@ import {
   restartAudioEngine,
   stopAudioEngine,
   testAudioRoutes,
+  testAudioLoopback,
   type AudioDevice,
   type AudioDeviceSnapshot,
   type AudioEngineStatus,
+  type AudioLoopbackTestResult,
   type AudioRouteTestResult,
   type AudioProcessingSettings,
   type ConversionMode,
@@ -591,6 +593,8 @@ function App() {
   const [deviceRefreshBusy, setDeviceRefreshBusy] = useState(false);
   const [routeTestBusy, setRouteTestBusy] = useState(false);
   const [routeTestResult, setRouteTestResult] = useState<AudioRouteTestResult | null>(null);
+  const [loopbackTestBusy, setLoopbackTestBusy] = useState(false);
+  const [loopbackTestResult, setLoopbackTestResult] = useState<AudioLoopbackTestResult | null>(null);
   const [runtimeRefreshBusy, setRuntimeRefreshBusy] = useState(false);
   const [startupBusy, setStartupBusy] = useState(true);
   const [modelQuery, setModelQuery] = useState("");
@@ -1367,6 +1371,33 @@ function App() {
       appendLiveLog(`Audio route test failed · ${String(error)}`, "error");
     } finally {
       setRouteTestBusy(false);
+    }
+  }
+
+  async function runLoopbackTest() {
+    if (loopbackTestBusy || running || !inputDeviceId || !outputDeviceId) return;
+    setLoopbackTestBusy(true);
+    setEngineError(null);
+    try {
+      const result = await testAudioLoopback(inputDeviceId, outputDeviceId);
+      setLoopbackTestResult(result);
+      if (result.inputError || result.outputError) {
+        const error = result.inputError ?? result.outputError ?? "The loopback streams reported an error.";
+        setEngineError(`Input/output loopback test failed: ${error}`);
+        appendLiveLog(`Input/output loopback failed · ${error}`, "error");
+      } else if (result.signalDetected) {
+        setNotice("Loopback signal detected on the selected input");
+        appendLiveLog(`Loopback signal detected · ${result.inputDeviceName}`, "success");
+      } else {
+        setNotice("No loopback signal detected on the selected input");
+        appendLiveLog(`Loopback silent · ${result.inputDeviceName}`, "warning");
+      }
+    } catch (error) {
+      setLoopbackTestResult(null);
+      setEngineError(String(error));
+      appendLiveLog(`Input/output loopback failed · ${String(error)}`, "error");
+    } finally {
+      setLoopbackTestBusy(false);
     }
   }
 
@@ -2348,6 +2379,7 @@ function App() {
           <div className="panel-heading setup-heading">
             <div><span className="eyebrow">Session</span><h2>Audio setup</h2><p className="panel-subtitle">Route your local audio safely</p></div>
             <div className="setup-heading-actions">
+              <button className="details-toggle refresh-button" onClick={runLoopbackTest} disabled={running || loopbackTestBusy || !inputDeviceId || !outputDeviceId}>{loopbackTestBusy ? "Listening…" : "Test loopback"}</button>
               <button className="details-toggle refresh-button" onClick={runRouteTest} disabled={running || routeTestBusy || !outputDeviceId}>{routeTestBusy ? "Testing…" : "Test routes"}</button>
               <button className="details-toggle refresh-button" onClick={refreshDevices} disabled={running || deviceRefreshBusy}>{deviceRefreshBusy ? "Checking…" : "Refresh"}</button>
             </div>
@@ -2356,7 +2388,7 @@ function App() {
           <section className="setup-section">
             <label className="device-field">
               <span className="field-label"><span className="device-glyph"><Icon name="microphone" /></span><span><strong>Microphone</strong><small>{deviceSummary(inputDevice)}</small></span></span>
-              <select value={inputDeviceId} onChange={(event) => setInputDeviceId(event.target.value)} disabled={running}>
+              <select value={inputDeviceId} onChange={(event) => { setInputDeviceId(event.target.value); setLoopbackTestResult(null); }} disabled={running}>
                 {devices.inputs.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}
               </select>
             </label>
@@ -2364,7 +2396,7 @@ function App() {
 
             <label className="device-field">
               <span className="field-label"><span className="device-glyph"><Icon name="speaker" /></span><span><strong>Output</strong><small>{deviceSummary(outputDevice)}</small></span></span>
-              <select value={outputDeviceId} onChange={(event) => { const next = event.target.value; setOutputDeviceId(next); setRouteTestResult(null); if (monitorDeviceId === next) setMonitorDeviceId(""); }} disabled={running}>
+              <select value={outputDeviceId} onChange={(event) => { const next = event.target.value; setOutputDeviceId(next); setRouteTestResult(null); setLoopbackTestResult(null); if (monitorDeviceId === next) setMonitorDeviceId(""); }} disabled={running}>
                 {devices.outputs.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}
               </select>
             </label>
@@ -2382,6 +2414,11 @@ function App() {
             {routeTestResult && <div className={`info-callout ${routeTestResult.outputError ? "error" : routeTestResult.monitorError ? "warning" : "success"}`} role="status">
               <span>{routeTestResult.outputError ? "!" : routeTestResult.monitorError ? "!" : "✓"}</span>
               <p><strong>{routeTestResult.outputError ? "Output callback needs attention." : routeTestResult.monitorError ? "Output callback passed; monitor needs attention." : "Output callbacks passed."}</strong> {routeTestResult.outputError ?? routeTestResult.monitorError ?? `${routeTestResult.outputDeviceName}${routeTestResult.monitorDeviceName ? ` + ${routeTestResult.monitorDeviceName}` : ""} · ${routeTestResult.durationMs} ms test tone`} <small>Callback test only; a virtual-cable loopback or downstream app route is not measured here.</small></p>
+            </div>}
+
+            {loopbackTestResult && <div className={`info-callout ${loopbackTestResult.inputError || loopbackTestResult.outputError ? "error" : loopbackTestResult.signalDetected ? "success" : "warning"}`} role="status">
+              <span>{loopbackTestResult.inputError || loopbackTestResult.outputError ? "!" : loopbackTestResult.signalDetected ? "✓" : "!"}</span>
+              <p><strong>{loopbackTestResult.inputError || loopbackTestResult.outputError ? "Loopback test needs attention." : loopbackTestResult.signalDetected ? "Loopback signal detected." : "No loopback signal detected."}</strong> {loopbackTestResult.inputError ?? loopbackTestResult.outputError ?? `${loopbackTestResult.outputDeviceName} → ${loopbackTestResult.inputDeviceName} · input peak ${loopbackTestResult.inputPeak.toFixed(4)}`} <small>This checks the selected output-to-input path with a short native tone before conversion starts.</small></p>
             </div>}
 
             <div className="audio-processing-toggle">

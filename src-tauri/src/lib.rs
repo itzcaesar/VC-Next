@@ -11,8 +11,8 @@ use std::{
 };
 
 use audio::{
-    AudioDeviceSnapshot, AudioEngine, AudioEngineStatus, AudioProcessingSettings,
-    AudioRouteTestResult,
+    AudioDeviceSnapshot, AudioEngine, AudioEngineStatus, AudioLoopbackTestResult,
+    AudioProcessingSettings, AudioRouteTestResult,
 };
 use live_sidecar::LiveRvcService;
 use serde::Serialize;
@@ -256,6 +256,27 @@ async fn test_audio_routes(
             return Err("Stop audio before testing an output route.".to_owned());
         }
         audio::test_output_routes(&output_device_id, monitor_device_id.as_deref(), duration_ms)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn test_audio_loopback(
+    input_device_id: String,
+    output_device_id: String,
+    duration_ms: u32,
+    engine: tauri::State<'_, SharedAudioEngine>,
+) -> Result<AudioLoopbackTestResult, String> {
+    let engine = Arc::clone(engine.inner());
+    run_blocking("Audio input/output loopback test", move || {
+        if engine
+            .lock()
+            .map_err(|_| "The audio engine lock is unavailable.".to_owned())?
+            .is_running()
+        {
+            return Err("Stop audio before testing an input/output loopback.".to_owned());
+        }
+        audio::test_input_output_loopback(&input_device_id, &output_device_id, duration_ms)
     })
     .await
 }
@@ -517,6 +538,7 @@ pub fn run() {
             stop_audio_engine,
             get_audio_engine_status,
             test_audio_routes,
+            test_audio_loopback,
             probe_inference_runtime,
             open_runtime_setup,
             get_runtime_setup_command,

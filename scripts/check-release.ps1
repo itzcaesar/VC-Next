@@ -11,6 +11,7 @@ try {
     npm run build
     cargo test --manifest-path src-tauri\Cargo.toml
     cargo test --manifest-path src-tauri\Cargo.toml --features native-validation --bin native-route-validation
+    cargo check --manifest-path src-tauri\Cargo.toml --features native-validation --bin native-fixture-playback
     $python = Join-Path $repoRoot "engine-python\.venv\Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
         throw "The project Python environment is missing at $python. Run npm run runtime:setup first."

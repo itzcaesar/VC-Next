@@ -96,6 +96,19 @@ export interface AudioRouteTestResult {
   monitorError: string | null;
 }
 
+export interface AudioLoopbackTestResult {
+  inputDeviceName: string;
+  outputDeviceName: string;
+  durationMs: number;
+  inputFrames: number;
+  outputFrames: number;
+  inputPeak: number;
+  outputPeak: number;
+  signalDetected: boolean;
+  inputError: string | null;
+  outputError: string | null;
+}
+
 export interface AudioProcessingSettings {
   inputGainDb: number;
   outputGainDb: number;
@@ -547,6 +560,32 @@ export async function testAudioRoutes(
   return invoke<AudioRouteTestResult>("test_audio_routes", {
     outputDeviceId,
     monitorDeviceId,
+    durationMs,
+  });
+}
+
+export async function testAudioLoopback(
+  inputDeviceId: string,
+  outputDeviceId: string,
+  durationMs = 1_200,
+): Promise<AudioLoopbackTestResult> {
+  if (!isTauriRuntime()) {
+    return {
+      inputDeviceName: "Browser preview input",
+      outputDeviceName: "Browser preview output",
+      durationMs,
+      inputFrames: Math.round(durationMs * 48),
+      outputFrames: Math.round(durationMs * 48),
+      inputPeak: 0.08,
+      outputPeak: 0.08,
+      signalDetected: true,
+      inputError: null,
+      outputError: null,
+    };
+  }
+  return invoke<AudioLoopbackTestResult>("test_audio_loopback", {
+    inputDeviceId,
+    outputDeviceId,
     durationMs,
   });
 }

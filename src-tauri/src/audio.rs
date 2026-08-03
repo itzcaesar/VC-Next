@@ -3,6 +3,8 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::{
+    fs,
+    path::Path,
     thread,
     time::{Duration, Instant},
 };
@@ -127,6 +129,34 @@ pub struct AudioRouteTestResult {
     monitor_peak: f32,
     output_error: Option<String>,
     monitor_error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioLoopbackTestResult {
+    input_device_name: String,
+    output_device_name: String,
+    duration_ms: u32,
+    input_frames: u64,
+    output_frames: u64,
+    input_peak: f32,
+    output_peak: f32,
+    signal_detected: bool,
+    input_error: Option<String>,
+    output_error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixturePlaybackResult {
+    input_path: String,
+    output_device_name: String,
+    requested_seconds: f64,
+    source_sample_rate: u32,
+    output_sample_rate: u32,
+    written_frames: u64,
+    peak: f32,
+    output_error: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -758,6 +788,327 @@ pub fn test_output_routes(
     })
 }
 
+/// Emit a bounded setup tone while listening on a selected input endpoint.
+///
+/// This is intentionally separate from the production engine. It answers the
+/// practical setup question that an output callback test cannot: does the
+/// selected return input actually receive audio from the selected output? A
+/// quiet endpoint is reported as a route result rather than treated as a
+/// model or inference failure.
+pub fn test_input_output_loopback(
+    input_id: &str,
+    output_id: &str,
+    duration_ms: u32,
+) -> Result<AudioLoopbackTestResult, String> {
+    if !(250..=5_000).contains(&duration_ms) {
+        return Err("Loopback test duration must be between 250 and 5,000 ms.".to_owned());
+    }
+
+    let host = cpal::default_host();
+    let (input_device, input_name) = find_device(&host, DeviceDirection::Input, input_id)?;
+    let (output_device, output_name) = find_device(&host, DeviceDirection::Output, output_id)?;
+    let input_supported = input_device
+        .default_input_config()
+        .map_err(|error| format!("Could not read the loopback input format: {error}"))?;
+    let output_supported = output_device
+        .default_output_config()
+        .map_err(|error| format!("Could not read the loopback output format: {error}"))?;
+
+    let input_state = Arc::new(InputProbeTelemetry::default());
+    let output_state = Arc::new(ToneTelemetry::new(
+        duration_ms,
+        output_supported.sample_rate(),
+    ));
+    let input_stream = build_input_probe_stream(
+        &input_device,
+        input_supported.sample_format(),
+        &input_supported.clone().into(),
+        Arc::clone(&input_state),
+    )?;
+    let output_stream = build_tone_stream(
+        &output_device,
+        output_supported.sample_format(),
+        &output_supported.clone().into(),
+        Arc::clone(&output_state),
+    )?;
+
+    input_stream
+        .play()
+        .map_err(|error| format!("Could not start the loopback input route: {error}"))?;
+    output_stream
+        .play()
+        .map_err(|error| format!("Could not start the loopback output route: {error}"))?;
+    thread::sleep(Duration::from_millis(duration_ms as u64 + 100));
+    drop(output_stream);
+    drop(input_stream);
+
+    let input_peak = f32::from_bits(input_state.peak_bits.load(Ordering::Relaxed));
+    let output_peak = f32::from_bits(output_state.peak_bits.load(Ordering::Relaxed));
+    Ok(AudioLoopbackTestResult {
+        input_device_name: input_name,
+        output_device_name: output_name,
+        duration_ms,
+        input_frames: input_state.frames.load(Ordering::Relaxed),
+        output_frames: output_state.frames.load(Ordering::Relaxed),
+        input_peak,
+        output_peak,
+        // The setup tone is emitted at 0.08 peak. A 0.003 threshold leaves
+        // headroom for normal device gain while rejecting the near-zero
+        // idle floor observed on an open but unconnected endpoint.
+        signal_detected: input_peak >= 0.003,
+        input_error: input_state.last_error(),
+        output_error: output_state.last_error(),
+    })
+}
+
+/// Play a mono PCM WAV through a selected native output endpoint. This helper
+/// is used by the speech-loopback validator so fixture playback and the RVC
+/// engine share the same CPAL/WASAPI path. It intentionally stays outside the
+/// production engine and only supports the common PCM/IEEE-float WAV formats.
+pub fn play_wav_fixture(
+    input_path: &str,
+    output_id: &str,
+    seconds: f64,
+    ready_file: Option<&str>,
+) -> Result<FixturePlaybackResult, String> {
+    if !seconds.is_finite() || !(0.1..=86_400.0).contains(&seconds) {
+        return Err("Fixture playback duration must be between 0.1 and 86,400 seconds.".to_owned());
+    }
+    let (samples, source_sample_rate) = read_wav_mono(Path::new(input_path))?;
+    let host = cpal::default_host();
+    let (output_device, output_device_name) = find_device(&host, DeviceDirection::Output, output_id)?;
+    let output_supported = output_device
+        .default_output_config()
+        .map_err(|error| format!("Could not read the fixture output format: {error}"))?;
+    let output_sample_rate = output_supported.sample_rate();
+    let samples = Arc::new(resample_fixture(&samples, source_sample_rate, output_sample_rate));
+    if samples.is_empty() {
+        return Err("The WAV fixture contains no audio samples.".to_owned());
+    }
+
+    let state = Arc::new(FixturePlaybackState {
+        samples: Arc::clone(&samples),
+        duration_frames: (seconds * f64::from(output_sample_rate)).round() as u64,
+        frames: AtomicU64::new(0),
+        last_error: Mutex::new(None),
+    });
+    let stream = build_fixture_stream(
+        &output_device,
+        output_supported.sample_format(),
+        &output_supported.clone().into(),
+        Arc::clone(&state),
+    )?;
+    stream
+        .play()
+        .map_err(|error| format!("Could not start the fixture output route: {error}"))?;
+    if let Some(path) = ready_file {
+        let marker = Path::new(path);
+        if let Some(parent) = marker.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create fixture ready-marker folder: {error}"))?;
+        }
+        let marker_json = serde_json::json!({
+            "input": input_path,
+            "outputDevice": output_device_name.clone(),
+            "sourceSampleRate": source_sample_rate,
+            "outputSampleRate": output_sample_rate,
+            "openedAt": format!("{:?}", Instant::now()),
+        });
+        fs::write(
+            marker,
+            serde_json::to_vec_pretty(&marker_json)
+                .map_err(|error| format!("Could not encode fixture ready marker: {error}"))?,
+        )
+        .map_err(|error| format!("Could not write fixture ready marker: {error}"))?;
+    }
+    thread::sleep(Duration::from_secs_f64(seconds + 0.05));
+    drop(stream);
+
+    Ok(FixturePlaybackResult {
+        input_path: input_path.to_owned(),
+        output_device_name,
+        requested_seconds: seconds,
+        source_sample_rate,
+        output_sample_rate,
+        written_frames: state.frames.load(Ordering::Relaxed),
+        peak: samples
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs())),
+        output_error: state.last_error(),
+    })
+}
+
+struct FixturePlaybackState {
+    samples: Arc<Vec<f32>>,
+    duration_frames: u64,
+    frames: AtomicU64,
+    last_error: Mutex<Option<String>>,
+}
+
+impl FixturePlaybackState {
+    fn record_error(&self, error: String) {
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(error);
+        }
+    }
+
+    fn last_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|error| error.clone())
+    }
+}
+
+fn build_fixture_stream(
+    device: &Device,
+    format: SampleFormat,
+    config: &StreamConfig,
+    state: Arc<FixturePlaybackState>,
+) -> Result<Stream, String> {
+    match format {
+        SampleFormat::F32 => build_fixture_stream_typed::<f32>(device, config, state, |sample| sample),
+        SampleFormat::I16 => build_fixture_stream_typed::<i16>(
+            device,
+            config,
+            state,
+            |sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16,
+        ),
+        SampleFormat::U16 => build_fixture_stream_typed::<u16>(
+            device,
+            config,
+            state,
+            |sample| ((sample.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16,
+        ),
+        unsupported => Err(format!(
+            "Output sample format {unsupported} is not supported by native fixture playback."
+        )),
+    }
+}
+
+fn build_fixture_stream_typed<T>(
+    device: &Device,
+    config: &StreamConfig,
+    state: Arc<FixturePlaybackState>,
+    convert: fn(f32) -> T,
+) -> Result<Stream, String>
+where
+    T: cpal::SizedSample + Copy + Send + 'static,
+{
+    let channels = config.channels as usize;
+    let error_state = Arc::clone(&state);
+    device
+        .build_output_stream(
+            *config,
+            move |data: &mut [T], _| {
+                for frame in data.chunks_exact_mut(channels) {
+                    let frame_index = state.frames.fetch_add(1, Ordering::Relaxed);
+                    let sample = if frame_index < state.duration_frames {
+                        state.samples[frame_index as usize % state.samples.len()]
+                    } else {
+                        0.0
+                    };
+                    frame.fill(convert(sample));
+                }
+            },
+            move |error| error_state.record_error(format!("Fixture output error: {error}")),
+            None,
+        )
+        .map_err(|error| format!("Could not create the fixture output stream: {error}"))
+}
+
+fn resample_fixture(samples: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
+    if samples.is_empty() || source_rate == target_rate {
+        return samples.to_vec();
+    }
+    let target_len = ((samples.len() as u64 * u64::from(target_rate))
+        / u64::from(source_rate)) as usize;
+    let target_len = target_len.max(1);
+    let ratio = source_rate as f64 / target_rate as f64;
+    (0..target_len)
+        .map(|index| {
+            let source_position = index as f64 * ratio;
+            let left = source_position.floor() as usize;
+            let right = (left + 1).min(samples.len() - 1);
+            let fraction = (source_position - left as f64) as f32;
+            samples[left.min(samples.len() - 1)]
+                + (samples[right] - samples[left.min(samples.len() - 1)]) * fraction
+        })
+        .collect()
+}
+
+fn read_wav_mono(path: &Path) -> Result<(Vec<f32>, u32), String> {
+    let bytes = fs::read(path).map_err(|error| format!("Could not read WAV fixture {}: {error}", path.display()))?;
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(format!("Fixture {} is not a RIFF/WAVE file.", path.display()));
+    }
+    let mut cursor = 12usize;
+    let mut format_tag = None;
+    let mut channels = 0u16;
+    let mut sample_rate = 0u32;
+    let mut bits_per_sample = 0u16;
+    let mut data = None;
+    while cursor + 8 <= bytes.len() {
+        let id = &bytes[cursor..cursor + 4];
+        let size = u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+        let start = cursor + 8;
+        let end = start.saturating_add(size).min(bytes.len());
+        if id == b"fmt " && end.saturating_sub(start) >= 16 {
+            format_tag = Some(u16::from_le_bytes(bytes[start..start + 2].try_into().unwrap()));
+            channels = u16::from_le_bytes(bytes[start + 2..start + 4].try_into().unwrap());
+            sample_rate = u32::from_le_bytes(bytes[start + 4..start + 8].try_into().unwrap());
+            bits_per_sample = u16::from_le_bytes(bytes[start + 14..start + 16].try_into().unwrap());
+        } else if id == b"data" {
+            data = Some((start, end));
+        }
+        cursor = end + (size & 1);
+    }
+    let format_tag = format_tag.ok_or_else(|| "WAV fixture has no fmt chunk.".to_owned())?;
+    let (data_start, data_end) = data.ok_or_else(|| "WAV fixture has no data chunk.".to_owned())?;
+    if channels == 0 || sample_rate == 0 {
+        return Err("WAV fixture has invalid channel or sample-rate metadata.".to_owned());
+    }
+    if !matches!(format_tag, 1 | 3) {
+        return Err(format!(
+            "WAV fixture format tag {format_tag} is unsupported; use PCM or IEEE float WAV."
+        ));
+    }
+    let bytes_per_sample = usize::from(bits_per_sample / 8);
+    if !matches!(bits_per_sample, 16 | 24 | 32) || bytes_per_sample == 0 {
+        return Err(format!(
+            "WAV fixture bit depth {bits_per_sample} is unsupported; use 16-, 24-, or 32-bit audio."
+        ));
+    }
+    let frame_bytes = bytes_per_sample * usize::from(channels);
+    if frame_bytes == 0 || data_end <= data_start || (data_end - data_start) < frame_bytes {
+        return Err("WAV fixture contains no complete audio frames.".to_owned());
+    }
+    let frame_count = (data_end - data_start) / frame_bytes;
+    let mut samples = Vec::with_capacity(frame_count);
+    for frame in 0..frame_count {
+        let frame_start = data_start + frame * frame_bytes;
+        let mut sum = 0.0_f32;
+        for channel in 0..usize::from(channels) {
+            let start = frame_start + channel * bytes_per_sample;
+            let value = match (format_tag, bits_per_sample) {
+                (1, 16) => i16::from_le_bytes(bytes[start..start + 2].try_into().unwrap()) as f32
+                    / i16::MAX as f32,
+                (1, 24) => {
+                    let raw = i32::from(bytes[start])
+                        | (i32::from(bytes[start + 1]) << 8)
+                        | (i32::from(bytes[start + 2]) << 16);
+                    let signed = if raw & 0x0080_0000 != 0 { raw | !0x00ff_ffff } else { raw };
+                    signed as f32 / 8_388_607.0
+                }
+                (1, 32) => i32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()) as f32
+                    / i32::MAX as f32,
+                (3, 32) => f32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()),
+                _ => unreachable!(),
+            };
+            sum += value;
+        }
+        samples.push((sum / f32::from(channels)).clamp(-1.0, 1.0));
+    }
+    Ok((samples, sample_rate))
+}
+
 fn wait_for_startup_prime(playback_ring: &ArrayQueue<f32>) {
     let deadline = Instant::now() + STARTUP_PRIME_TIMEOUT;
     while playback_ring.len() < STARTUP_PRIME_FRAMES && Instant::now() < deadline {
@@ -853,7 +1204,9 @@ fn find_device(
 
     for (index, device) in devices.enumerate() {
         let name = device.to_string();
-        if device_identifier(&device, direction, index) == requested_id {
+        if device_identifier(&device, direction, index) == requested_id
+            || device.to_string() == requested_id
+        {
             return Ok((device, name));
         }
     }
@@ -1185,6 +1538,101 @@ impl ToneTelemetry {
             }
         }
     }
+}
+
+#[derive(Default)]
+struct InputProbeTelemetry {
+    frames: AtomicU64,
+    peak_bits: AtomicU32,
+    last_error: Mutex<Option<String>>,
+}
+
+impl InputProbeTelemetry {
+    fn record_error(&self, error: String) {
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(error);
+        }
+    }
+
+    fn last_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|error| error.clone())
+    }
+
+    fn record_peak(&self, peak: f32) {
+        let mut current = self.peak_bits.load(Ordering::Relaxed);
+        loop {
+            let current_peak = f32::from_bits(current);
+            if peak <= current_peak {
+                break;
+            }
+            match self.peak_bits.compare_exchange_weak(
+                current,
+                peak.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
+        }
+    }
+}
+
+fn build_input_probe_stream(
+    device: &Device,
+    format: SampleFormat,
+    config: &StreamConfig,
+    telemetry: Arc<InputProbeTelemetry>,
+) -> Result<Stream, String> {
+    match format {
+        SampleFormat::F32 => {
+            build_input_probe_stream_typed::<f32>(device, config, telemetry, |sample| sample)
+        }
+        SampleFormat::I16 => build_input_probe_stream_typed::<i16>(
+            device,
+            config,
+            telemetry,
+            |sample| sample as f32 / i16::MAX as f32,
+        ),
+        SampleFormat::U16 => build_input_probe_stream_typed::<u16>(
+            device,
+            config,
+            telemetry,
+            |sample| sample as f32 / u16::MAX as f32 * 2.0 - 1.0,
+        ),
+        unsupported => Err(format!(
+            "Input sample format {unsupported} is not supported by the loopback test."
+        )),
+    }
+}
+
+fn build_input_probe_stream_typed<T>(
+    device: &Device,
+    config: &StreamConfig,
+    telemetry: Arc<InputProbeTelemetry>,
+    convert: fn(T) -> f32,
+) -> Result<Stream, String>
+where
+    T: cpal::SizedSample + Copy + Send + 'static,
+{
+    let channels = config.channels as usize;
+    let error_telemetry = Arc::clone(&telemetry);
+    device
+        .build_input_stream(
+            *config,
+            move |data: &[T], _| {
+                let mut block_peak = 0.0_f32;
+                for frame in data.chunks_exact(channels) {
+                    let mono = frame.iter().copied().map(convert).sum::<f32>() / channels as f32;
+                    block_peak = block_peak.max(mono.abs());
+                    telemetry.frames.fetch_add(1, Ordering::Relaxed);
+                }
+                telemetry.record_peak(block_peak);
+            },
+            move |error| error_telemetry.record_error(format!("Input loopback error: {error}")),
+            None,
+        )
+        .map_err(|error| format!("Could not create the loopback input stream: {error}"))
 }
 
 fn build_tone_stream(
@@ -1837,5 +2285,43 @@ mod tests {
         assert!(first.primed && second.primed);
         assert!((first.sample - 0.0).abs() < 1e-6);
         assert!((second.sample - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reads_pcm_wav_fixtures_and_resamples_them() {
+        let path = std::env::temp_dir().join(format!(
+            "vc-next-audio-fixture-{}.wav",
+            std::process::id()
+        ));
+        let samples = [-32_768_i16, 0, 32_767, 0];
+        let mut data = Vec::new();
+        for sample in samples {
+            data.extend_from_slice(&sample.to_le_bytes());
+        }
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36_u32 + data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&48_000_u32.to_le_bytes());
+        wav.extend_from_slice(&96_000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        std::fs::write(&path, wav).expect("test WAV should be writable");
+
+        let (decoded, rate) = read_wav_mono(&path).expect("test WAV should decode");
+        assert_eq!(rate, 48_000);
+        assert_eq!(decoded.len(), 4);
+        assert!((decoded[0] + 1.0).abs() < 1e-5);
+        assert!(decoded[2] > 0.99);
+        let resampled = resample_fixture(&decoded, rate, 24_000);
+        assert_eq!(resampled.len(), 2);
+        assert!(resampled.iter().all(|sample| sample.is_finite()));
+        let _ = std::fs::remove_file(path);
     }
 }

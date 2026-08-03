@@ -1,5 +1,6 @@
 param(
     [switch]$List,
+    [switch]$Loopback,
     [Parameter(Mandatory = $false)]
     [string]$ModelPath = "",
     [string]$IndexPath = "",
@@ -25,6 +26,15 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $args = @()
 if ($List) {
     $args += "--list"
+} elseif ($Loopback) {
+    if (-not $InputDevice) { throw "InputDevice is required for loopback validation." }
+    if (-not $OutputDevice) { throw "OutputDevice is required for loopback validation." }
+    $args += @(
+        "--loopback",
+        "--input", $InputDevice,
+        "--output", $OutputDevice,
+        "--milliseconds", ([int]($Seconds * 1000))
+    )
 } else {
     if (-not $ModelPath) { throw "ModelPath is required unless -List is used." }
     if (-not $InputDevice) { throw "InputDevice is required unless -List is used." }

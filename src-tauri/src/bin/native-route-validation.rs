@@ -16,15 +16,15 @@ mod sidecar;
 use std::{env, fs, thread, time::Duration};
 
 use audio::{
-    enumerate_devices, test_output_routes, AudioDeviceSnapshot, AudioEngine, AudioEngineStatus,
-    AudioProcessingSettings,
+    enumerate_devices, test_input_output_loopback, test_output_routes, AudioDeviceSnapshot,
+    AudioEngine, AudioEngineStatus, AudioProcessingSettings,
 };
 use live_sidecar::LiveRvcService;
 use serde_json::{json, Value};
 
 fn usage() {
     eprintln!(
-        "Usage:\n  native-route-validation --list\n  native-route-validation --test-tone --output <device id or name> [--monitor <id/name>] [--milliseconds N]\n  native-route-validation --model <pth|onnx> --input <device id or name> --output <device id or name> [--monitor <id/name>] [--index <index>] [--contentvec <onnx>] [--seconds N] [--pitch N] [--index-ratio N] [--protect N] [--chunk N] [--extra N] [--preset quality|balanced|latency] [--high-pass] [--report <json path>]"
+        "Usage:\n  native-route-validation --list\n  native-route-validation --test-tone --output <device id or name> [--monitor <id/name>] [--milliseconds N]\n  native-route-validation --loopback --input <device id or name> --output <device id or name> [--milliseconds N]\n  native-route-validation --model <pth|onnx> --input <device id or name> --output <device id or name> [--monitor <id/name>] [--index <index>] [--contentvec <onnx>] [--seconds N] [--pitch N] [--index-ratio N] [--protect N] [--chunk N] [--extra N] [--preset quality|balanced|latency] [--high-pass] [--report <json path>]"
     );
 }
 
@@ -135,6 +135,22 @@ fn run(args: &[String]) -> Result<(), String> {
             "{}",
             serde_json::to_string_pretty(&result)
                 .map_err(|error| format!("Could not encode route test report: {error}"))?
+        );
+        return Ok(());
+    }
+    if has_flag(args, "--loopback") {
+        let input_selector =
+            option(args, "--input").ok_or_else(|| "--input is required.".to_owned())?;
+        let output_selector =
+            option(args, "--output").ok_or_else(|| "--output is required.".to_owned())?;
+        let input_id = resolve_device(&snapshot, "inputs", &input_selector)?;
+        let output_id = resolve_device(&snapshot, "outputs", &output_selector)?;
+        let milliseconds: u32 = parse(args, "--milliseconds", 1_200_u32)?;
+        let result = test_input_output_loopback(&input_id, &output_id, milliseconds)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result)
+                .map_err(|error| format!("Could not encode loopback test report: {error}"))?
         );
         return Ok(());
     }
