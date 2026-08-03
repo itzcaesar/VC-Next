@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 from time import perf_counter
@@ -1115,4 +1116,13 @@ def serve_worker(input_stream: BinaryIO, output_stream: BinaryIO) -> int:
 
 
 def run_worker() -> int:
+    seed_value = os.environ.get("VC_NEXT_TORCH_SEED", "").strip()
+    if seed_value:
+        try:
+            seed = int(seed_value)
+        except ValueError as error:
+            raise ValueError("VC_NEXT_TORCH_SEED must be an integer.") from error
+        import torch
+
+        torch.manual_seed(seed)
     return serve_worker(sys.stdin.buffer, sys.stdout.buffer)

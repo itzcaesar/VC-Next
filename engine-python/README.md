@@ -206,6 +206,21 @@ instead of supplying manual pitch/index/Protect values. With an empty input,
 the smoke report should show `peak: 0.0` and a positive
 `silenceSuppressedCalls` count.
 
+For reproducible backend comparisons, pass the same diagnostic seed to both
+runs. This does not change normal desktop behavior; it only sets the worker's
+Torch RNG before loading the model:
+
+```powershell
+.\engine-python\.venv\Scripts\python.exe engine-python\tools\live_worker_smoke.py `
+  --model C:\path\voice.pth --index C:\path\voice.index `
+  --contentvec C:\path\contentvec-f.onnx --rmvpe C:\path\rmvpe_20231006.onnx `
+  --seed 777 --input .\speech.wav --output .\contentvec.wav
+```
+
+Compare that output with an explicit `hubert_base.pt` run using the same
+`--seed`. RVC's generator is stochastic by design, so comparing unseeded WAVs
+can exaggerate a difference that is not caused by the feature backend.
+
 ## Tests
 
 ```powershell

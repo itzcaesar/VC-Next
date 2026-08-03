@@ -129,3 +129,10 @@ Chunk/Extra geometry, stitching, and device routing.
 
 Fairseq initialization was slower on this machine (about 3.6 s versus 3.3 s for
 the ONNX feature pipeline), so ContentVec ONNX remains the recommended default.
+
+To remove generator randomness from the output check, the smoke harness now
+accepts a diagnostic `--seed`. With seed `777`, the same 72,000-frame fixture
+produced a best-lag correlation of `0.9992513`, RMSE `0.00022851`, MAE
+`0.00004496`, and a gain ratio of `0.9997887` between ContentVec and Fairseq
+HuBERT. That is strong evidence that the remaining unseeded waveform variation
+is the RVC latent-noise sampler rather than a feature-path mismatch.

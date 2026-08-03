@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -75,6 +76,11 @@ def main() -> int:
     parser.add_argument("--speaker-id", type=int, default=0)
     parser.add_argument("--f0-threshold", type=float, default=0.30)
     parser.add_argument(
+        "--seed",
+        type=int,
+        help="Optional diagnostic Torch seed for reproducible cross-backend comparisons.",
+    )
+    parser.add_argument(
         "--use-package-defaults",
         action="store_true",
         help="Let the worker import pitch/index/protection/chunk/embedder defaults from params.json.",
@@ -89,12 +95,18 @@ def main() -> int:
     if args.chunks < 2:
         parser.error("--chunks must be at least 2 so the SOLA stream can prime.")
 
+    worker_environment = os.environ.copy()
+    if args.seed is not None:
+        worker_environment["VC_NEXT_TORCH_SEED"] = str(args.seed)
+    else:
+        worker_environment.pop("VC_NEXT_TORCH_SEED", None)
     process = subprocess.Popen(
         [sys.executable, "-m", "vc_next_sidecar", "--worker"],
         cwd=Path(__file__).resolve().parents[1],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=worker_environment,
     )
     try:
         handshake = _request(
@@ -184,6 +196,7 @@ def main() -> int:
         print(
             json.dumps(
                 {
+                    "seed": args.seed,
                     "handshake": json.loads(handshake.payload),
                     "status": status,
                     "loadRoundTripMs": round(load_ms, 1),
