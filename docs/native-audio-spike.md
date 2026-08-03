@@ -322,6 +322,9 @@ the model. `-RequireSignal` makes a speech acceptance run fail when either
 the maximum captured input or converted output peak is below `-MinimumPeak`
 (0.005 by default), rather than silently passing an all-zero graph. Omit that
 switch for intentional idle/silence tests. The
+fixture player and recorder explicitly use shared WASAPI with automatic rate
+conversion, matching the production CPAL route when a 44.1 kHz cable endpoint
+feeds the fixed 48 kHz RVC path. The
 RTX 4050 `e-girl_e350_s42700.pth` plus its matching 62,851-vector index has
 passed the persistent-worker soak with CUDA execution, a healthy worker, and
 zero missed deadlines. The native route's idle and monitor-fallback checks also

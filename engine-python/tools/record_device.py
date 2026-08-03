@@ -41,6 +41,20 @@ def resolve_input_device(device: str | int) -> int | str:
     )
 
 
+def wasapi_shared_settings(device: int | str) -> object | None:
+    """Match the native route's shared WASAPI/rate-conversion policy."""
+    if not isinstance(device, int):
+        return None
+    try:
+        info = sd.query_devices(device)
+        hostapi = sd.query_hostapis(int(info["hostapi"]))["name"]
+        if hostapi != "Windows WASAPI":
+            return None
+        return sd.WasapiSettings(exclusive=False, auto_convert=True)
+    except Exception:
+        return None
+
+
 def record_device(*, device: str, output: Path, seconds: float, sample_rate: int, block_size: int) -> dict[str, object]:
     if seconds <= 0 or sample_rate <= 0 or block_size <= 0:
         raise ValueError("seconds, sample-rate, and block-size must be positive")
@@ -60,14 +74,18 @@ def record_device(*, device: str, output: Path, seconds: float, sample_rate: int
             raise sd.CallbackStop()
 
     started = time.perf_counter()
-    with sd.InputStream(
+    stream_kwargs = dict(
         samplerate=sample_rate,
         blocksize=block_size,
         dtype="float32",
         channels=1,
         device=selected,
         callback=callback,
-    ):
+    )
+    extra_settings = wasapi_shared_settings(selected)
+    if extra_settings is not None:
+        stream_kwargs["extra_settings"] = extra_settings
+    with sd.InputStream(**stream_kwargs):
         while frames < total_frames:
             time.sleep(min(0.25, max(0.01, (total_frames - frames) / sample_rate)))
 

@@ -51,6 +51,20 @@ def resolve_output_device(device: str | int) -> int | str:
     )
 
 
+def wasapi_shared_settings(device: int | str) -> object | None:
+    """Match the native route's shared WASAPI/rate-conversion policy."""
+    if not isinstance(device, int):
+        return None
+    try:
+        info = sd.query_devices(device)
+        hostapi = sd.query_hostapis(int(info["hostapi"]))["name"]
+        if hostapi != "Windows WASAPI":
+            return None
+        return sd.WasapiSettings(exclusive=False, auto_convert=True)
+    except Exception:
+        return None
+
+
 def play_fixture(
     *,
     input_path: str,
@@ -74,13 +88,17 @@ def play_fixture(
     written = 0
     started = time.perf_counter()
     output_device = resolve_output_device(device)
-    with sd.OutputStream(
+    stream_kwargs = dict(
         samplerate=sample_rate,
         blocksize=block_frames,
         dtype="float32",
         channels=1,
         device=output_device,
-    ) as stream:
+    )
+    extra_settings = wasapi_shared_settings(output_device)
+    if extra_settings is not None:
+        stream_kwargs["extra_settings"] = extra_settings
+    with sd.OutputStream(**stream_kwargs) as stream:
         if ready_file is not None:
             ready_path = Path(ready_file)
             ready_path.parent.mkdir(parents=True, exist_ok=True)

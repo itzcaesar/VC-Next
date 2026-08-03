@@ -451,6 +451,10 @@ npm run validate:native-speech -- `
   -RequireSignal -MinimumPeak 0.005
 ```
 
+The fixture player and recorder use shared WASAPI with automatic rate
+conversion, matching the production CPAL route when a 44.1 kHz cable endpoint
+feeds the fixed 48 kHz RVC path.
+
 To exercise the actual native Windows route used by the Tauri host, use the
 native validation binary. It enumerates CPAL/WASAPI endpoints, loads the paired
 checkpoint and index, starts native input/output/optional monitor streams, and
