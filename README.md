@@ -277,8 +277,8 @@ cargo test --manifest-path src-tauri\Cargo.toml
 .\engine-python\.venv\Scripts\python.exe -m unittest discover -s engine-python\tests -p "test_*.py" -v
 ```
 
-The current working tree passes 33 Rust library tests, 30 native-route tests,
-71 Python tests, and the TypeScript/Vite production build. The runtime probe
+The current working tree passes 34 Rust library tests, 31 native-route tests,
+79 Python tests, and the TypeScript/Vite production build. The runtime probe
 checks PyTorch CUDA and the ONNX Runtime CUDA provider before reporting RVC
 readiness, while the desktop diagnostics use a native NVIDIA/Windows GPU probe
 instead of assuming the development machine. A native Tauri bundle still
