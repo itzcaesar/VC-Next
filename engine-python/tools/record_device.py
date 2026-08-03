@@ -55,22 +55,35 @@ def wasapi_shared_settings(device: int | str) -> object | None:
         return None
 
 
-def record_device(*, device: str, output: Path, seconds: float, sample_rate: int, block_size: int) -> dict[str, object]:
+def record_device(
+    *,
+    device: str,
+    output: Path,
+    seconds: float,
+    sample_rate: int,
+    block_size: int,
+    ready_file: str | Path | None = None,
+    stop_file: str | Path | None = None,
+) -> dict[str, object]:
     if seconds <= 0 or sample_rate <= 0 or block_size <= 0:
         raise ValueError("seconds, sample-rate, and block-size must be positive")
     selected = resolve_input_device(device)
     total_frames = max(1, round(seconds * sample_rate))
     chunks: list[np.ndarray] = []
     frames = 0
+    stopped = False
     statuses: list[str] = []
+    ready_path = Path(ready_file) if ready_file is not None else None
+    stop_path = Path(stop_file) if stop_file is not None else None
 
     def callback(indata, count, _time, status):
-        nonlocal frames
+        nonlocal frames, stopped
         if status and len(statuses) < 100:
             statuses.append(str(status))
         chunks.append(np.asarray(indata[:, 0], dtype=np.float32).copy())
         frames += int(count)
-        if frames >= total_frames:
+        if frames >= total_frames or (stop_path is not None and stop_path.is_file()):
+            stopped = True
             raise sd.CallbackStop()
 
     started = time.perf_counter()
@@ -86,7 +99,21 @@ def record_device(*, device: str, output: Path, seconds: float, sample_rate: int
     if extra_settings is not None:
         stream_kwargs["extra_settings"] = extra_settings
     with sd.InputStream(**stream_kwargs):
-        while frames < total_frames:
+        if ready_path is not None:
+            ready_path.parent.mkdir(parents=True, exist_ok=True)
+            ready_path.write_text(
+                json.dumps(
+                    {
+                        "device": device,
+                        "selectedDevice": str(selected),
+                        "sampleRate": sample_rate,
+                        "openedAt": time.time(),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        while frames < total_frames and not stopped:
             time.sleep(min(0.25, max(0.01, (total_frames - frames) / sample_rate)))
 
     samples = np.concatenate(chunks)[:total_frames] if chunks else np.zeros(0, dtype=np.float32)
@@ -119,9 +146,30 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=12.0)
     parser.add_argument("--sample-rate", type=int, default=48_000)
     parser.add_argument("--block-size", type=int, default=480)
+    parser.add_argument(
+        "--ready-file",
+        help="Write a JSON marker after the input stream opens.",
+    )
+    parser.add_argument(
+        "--stop-file",
+        help="Stop after the marker file appears and write the captured WAV.",
+    )
     args = parser.parse_args()
     try:
-        print(json.dumps(record_device(device=args.device, output=args.output, seconds=args.seconds, sample_rate=args.sample_rate, block_size=args.block_size), indent=2))
+        print(
+            json.dumps(
+                record_device(
+                    device=args.device,
+                    output=args.output,
+                    seconds=args.seconds,
+                    sample_rate=args.sample_rate,
+                    block_size=args.block_size,
+                    ready_file=args.ready_file,
+                    stop_file=args.stop_file,
+                ),
+                indent=2,
+            )
+        )
         return 0
     except Exception as error:
         print(json.dumps({"ok": False, "error": str(error)}, indent=2))

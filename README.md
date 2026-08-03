@@ -278,7 +278,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 ```
 
 The current working tree passes 34 Rust library tests, 31 native-route tests,
-79 Python tests, and the TypeScript/Vite production build. The runtime probe
+80 Python tests, and the TypeScript/Vite production build. The runtime probe
 checks PyTorch CUDA and the ONNX Runtime CUDA provider before reporting RVC
 readiness, while the desktop diagnostics use a native NVIDIA/Windows GPU probe
 instead of assuming the development machine. A native Tauri bundle still
@@ -435,6 +435,33 @@ the reference machine) and start it before the speech harness:
 The helper writes a mono WAV plus a JSON summary to stdout. A zero peak means
 the selected input endpoint is open but silent; check the VoiceMeeter bus and
 the app's **No input signal detected** warning before changing model settings.
+
+The speech harness can manage that recorder for you. Pass `-CaptureDevice` to
+start it before the fixture and native route, stop it after the run, and embed
+the capture summary in the JSON report. Use the capture endpoint's native
+Windows rate (Cable B is 44.1 kHz here):
+
+```powershell
+npm run validate:native-speech -- `
+  -ModelPath "C:\path\to\voice.pth" `
+  -IndexPath "C:\path\to\voice.index" `
+  -FixturePath "C:\path\to\speech.wav" `
+  -InputDevice "CABLE-A Output (VB-Audio Cable A)" `
+  -FixtureOutputDevice "CABLE-A Input (VB-Audio Cable A)" `
+  -OutputDevice "CABLE-B Input (VB-Audio Cable B)" `
+  -CaptureDevice "CABLE-B Output (VB-Audio Cable B)" `
+  -CapturePath outputs\native-cable-b-integrated.wav `
+  -CaptureSampleRate 44100 -CaptureBlockSize 441 `
+  -Seconds 12 -Preset balanced -RequireSignal
+```
+
+The report's `capture.summary` contains the far-end peak and callback
+warnings. With `-RequireSignal`, a silent capture fails the run even when the
+native worker produced healthy callbacks; this distinguishes a VoiceMeeter or
+virtual-cable routing problem from model/inference silence. Omit
+`-RequireSignal` for deliberate idle tests. If no `.index` is supplied, the
+diagnostic automatically disables retrieval instead of failing an ONNX voice
+that has no companion index.
 
 For the native speech harness, add `-RequireSignal` to make the run fail when
 the fixture bus or selected input/output endpoints stay silent. The harness

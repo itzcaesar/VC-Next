@@ -334,6 +334,35 @@ capture endpoint, however, so this harness is intentionally still marked
 pending for converted-speech acceptance; a non-zero worker or fixture result
 must not be mistaken for end-to-end device loopback proof.
 
+The harness can now own the far-end recorder so the timing window is
+deterministic. Add `-CaptureDevice` and an output path; the recorder opens
+before the fixture and native route, then stops cleanly after the native report
+is written:
+
+```powershell
+npm run validate:native-speech -- `
+  -ModelPath "C:\path\to\voice.pth" `
+  -IndexPath "C:\path\to\voice.index" `
+  -FixturePath "C:\path\to\speech.flac" `
+  -InputDevice "CABLE-A Output (VB-Audio Cable A)" `
+  -FixtureOutputDevice "CABLE-A Input (VB-Audio Cable A)" `
+  -OutputDevice "CABLE-B Input (VB-Audio Cable B)" `
+  -CaptureDevice "CABLE-B Output (VB-Audio Cable B)" `
+  -CapturePath outputs\native-cable-b-integrated.wav `
+  -CaptureSampleRate 44100 -CaptureBlockSize 441 `
+  -Seconds 12 -Preset balanced -RequireSignal `
+  -ReportPath outputs\native-speech-loopback-integrated.json
+```
+
+The report adds a `capture` object with the selected endpoint, WAV path, and
+the recorder's JSON summary (`peak`, `meanAbs`, frame count, and callback
+warnings). `-RequireSignal` checks native input/output and, when capture is
+enabled, the far-end peak as well. A healthy native report paired with a zero
+capture peak means the downstream graph is silent; inspect the cable or
+VoiceMeeter bus before changing RVC settings.
+When no `.index` is provided, the PowerShell wrapper sets retrieval to zero so
+exported ONNX voices without a companion index can still be validated.
+
 To capture the far side of a virtual cable for inspection, use the diagnostic
 recorder at the endpoint's own Windows sample rate. For example, Cable B's
 capture endpoint on the reference machine is 44.1 kHz even though the native
