@@ -503,7 +503,7 @@ When a live session stops producing audio:
 4. If conversion alone is unstable, stop audio, run **Hardware calibration**, apply the recommended profile, and start again.
 5. Use **Copy report** in diagnostics when reporting a model or device-specific failure. Reports include model/settings metadata but only checkpoint basenames, not full local paths.
 
-If the engine panel reports that the RVC runtime needs attention, choose **Run setup** in the warning. The desktop host opens the staged `setup-runtime.ps1` bootstrap in a visible PowerShell window; a source checkout gets an adjacent `.venv`, while an install under `Program Files` uses `%LOCALAPPDATA%\VC Next\engine-python\.venv`. It installs the verified dependencies and leaves the probe output available for troubleshooting. **Copy command** remains available for source checkouts (`npm run runtime:setup`). The app intentionally does not install multi-gigabyte CUDA dependencies silently.
+If the engine panel reports that the RVC runtime needs attention, choose **Run setup** in the warning. The desktop host opens the staged `setup-runtime.ps1` bootstrap in a visible PowerShell window; a source checkout gets an adjacent `.venv`, while an install under `Program Files` uses `%LOCALAPPDATA%\VC Next\engine-python\.venv`. It installs the verified dependencies and leaves the probe output available for troubleshooting. **Copy command** copies the source `npm run runtime:setup` command during development and the resolved staged PowerShell command from an installed app. The app intentionally does not install multi-gigabyte CUDA dependencies silently.
 
 ### Release preparation
 

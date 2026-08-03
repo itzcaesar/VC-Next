@@ -271,6 +271,11 @@ async fn open_runtime_setup() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn get_runtime_setup_command() -> Result<String, String> {
+    run_blocking("Runtime setup command", || sidecar::runtime_setup_command()).await
+}
+
+#[tauri::command]
 async fn inspect_rvc_model(path: String) -> Result<serde_json::Value, String> {
     run_blocking("RVC model inspection", move || {
         sidecar::inspect_model(&path)
@@ -514,6 +519,7 @@ pub fn run() {
             test_audio_routes,
             probe_inference_runtime,
             open_runtime_setup,
+            get_runtime_setup_command,
             inspect_rvc_model,
             discover_rvc_models,
             inspect_trusted_rvc_checkpoint,

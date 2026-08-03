@@ -601,6 +601,30 @@ class RetrievalIndexTests(unittest.TestCase):
         # ``feature_buffer[:npyOffset:2]`` occupies after tail cropping.
         np.testing.assert_allclose(blended[0, 0], np.asarray([9.0, 8.0]))
 
+    def test_onnx_front_context_trim_matches_upstream_interpolated_rows(self) -> None:
+        import numpy as np
+
+        from vc_next_sidecar.rvc_compat.offline import _trim_onnx_front_context
+
+        features = np.arange(1 * 10 * 2, dtype=np.float32).reshape(1, 10, 2)
+        protected = features + 100.0
+        trimmed, protected_trimmed = _trim_onnx_front_context(features, protected, 2)
+
+        # ``silence_front_frames`` is measured before the 2x feature
+        # interpolation, so two front pitch rows become four ONNX rows.
+        self.assertEqual(trimmed.shape, (1, 6, 2))
+        np.testing.assert_allclose(trimmed, features[:, 4:, :])
+        np.testing.assert_allclose(protected_trimmed, protected[:, 4:, :])
+
+    def test_onnx_front_context_trim_rejects_an_empty_generator_window(self) -> None:
+        import numpy as np
+
+        from vc_next_sidecar.rvc_compat.offline import _trim_onnx_front_context
+
+        features = np.zeros((1, 5, 2), dtype=np.float32)
+        with self.assertRaisesRegex(ValueError, "too short"):
+            _trim_onnx_front_context(features, None, 2)
+
     def test_index_dimension_mismatch_is_rejected(self) -> None:
         import faiss
         import numpy as np

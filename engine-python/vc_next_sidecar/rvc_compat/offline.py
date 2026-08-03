@@ -665,6 +665,18 @@ def _run_onnx_generator(
         protected_source = torch_functional.interpolate(
             protected_source.permute(0, 2, 1), scale_factor=2
         ).permute(0, 2, 1)
+    # w-okada's ONNX inferencer removes the synthetic Extra/context prefix
+    # after feature interpolation.  The PyTorch inferencer keeps that prefix
+    # and relies on the full convert window, but the exported ONNX graph is
+    # called with only the live feature tail.  Keeping this boundary explicit
+    # is important for both model quality and the rolling feature buffer used
+    # by the next live hop.
+    features, protected_source = _trim_onnx_front_context(
+        features,
+        protected_source,
+        silence_front_frames,
+    )
+
     shifted_pitch = np.asarray(pitchf, dtype=np.float32) * (2.0 ** (pitch_shift / 12.0))
     frame_count = min(features.shape[1], shifted_pitch.shape[0])
     if frame_count < 2:
@@ -704,6 +716,32 @@ def _run_onnx_generator(
         generator_ms,
         retrieval_ms,
     )
+
+
+def _trim_onnx_front_context(
+    features: Any,
+    protected_source: Any | None,
+    silence_front_frames: int,
+) -> tuple[Any, Any | None]:
+    """Remove w-okada's synthetic front rows from an exported ONNX call.
+
+    ContentVec features are interpolated to two rows per 10 ms pitch frame.
+    The upstream ONNX inferencer therefore removes ``npyOffset * 2`` rows
+    after interpolation, while the PyTorch path keeps the full conversion
+    window.  This small helper keeps that model-family distinction testable.
+    """
+
+    front_trim = max(0, int(silence_front_frames) * 2)
+    if front_trim <= 0:
+        return features, protected_source
+    if features.shape[1] <= front_trim + 1:
+        raise ValueError(
+            "The ONNX feature sequence is too short after removing front context."
+        )
+    features = features[:, front_trim:, :]
+    if protected_source is not None:
+        protected_source = protected_source[:, front_trim:, :]
+    return features, protected_source
 
 
 def convert_file(

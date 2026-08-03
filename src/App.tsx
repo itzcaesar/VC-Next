@@ -17,6 +17,7 @@ import {
   discoverRvcModels,
   probeInferenceRuntime,
   openRuntimeSetup,
+  getRuntimeSetupCommand,
   loadLiveRvcModel,
   unloadLiveRvcModel,
   setLiveRvcSettings,
@@ -1390,14 +1391,16 @@ function App() {
   }
 
   async function copyRuntimeSetupCommand() {
-    const command = "npm run runtime:setup";
+    let command = "npm run runtime:setup";
     try {
+      command = await getRuntimeSetupCommand();
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable.");
       await navigator.clipboard.writeText(command);
       setNotice("Runtime setup command copied to the clipboard");
       appendLiveLog("Runtime setup command copied", "info");
-    } catch {
-      setEngineError(`Run ${command} from the VC Next project folder to install the local CUDA runtime.`);
+    } catch (error) {
+      setEngineError(`Copy failed. Run this command in PowerShell to install the local CUDA runtime: ${command}`);
+      appendLiveLog(`Could not prepare runtime setup command · ${String(error)}`, "error");
     }
   }
 

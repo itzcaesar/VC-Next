@@ -561,6 +561,11 @@ export async function openRuntimeSetup(): Promise<string> {
   return invoke<string>("open_runtime_setup");
 }
 
+export async function getRuntimeSetupCommand(): Promise<string> {
+  if (!isTauriRuntime()) return "npm run runtime:setup";
+  return invoke<string>("get_runtime_setup_command");
+}
+
 export async function inspectRvcModel(path: string): Promise<ModelInspectionResult> {
   if (!isTauriRuntime()) throw new Error("Model inspection requires the Tauri desktop app.");
   return invoke<ModelInspectionResult>("inspect_rvc_model", { path });

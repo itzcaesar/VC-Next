@@ -84,6 +84,24 @@ pub fn open_runtime_setup() -> Result<String, String> {
     Ok(script.display().to_string())
 }
 
+/// Return a copyable command for the visible runtime bootstrap.
+///
+/// The source checkout can use `npm run runtime:setup`, but an installed
+/// application has no project root or npm script. Resolve the staged script
+/// beside the installed sidecar so the command is useful in both cases.
+pub fn runtime_setup_command() -> Result<String, String> {
+    let engine_dir = engine_directory()?;
+    let script = runtime_setup_script(&engine_dir)?;
+    let escaped = script.display().to_string().replace('\'', "''");
+    if cfg!(windows) {
+        Ok(format!(
+            "powershell.exe -NoProfile -ExecutionPolicy Bypass -File '{escaped}'"
+        ))
+    } else {
+        Ok(format!("pwsh -NoProfile -File '{escaped}'"))
+    }
+}
+
 pub fn inspect_model(path: &str) -> Result<Value, String> {
     call("inspect_model", json!({ "path": path }))
 }
@@ -302,5 +320,12 @@ mod tests {
     fn runtime_setup_script_is_available_from_source_checkout() {
         let engine = engine_directory().unwrap();
         assert!(runtime_setup_script(&engine).unwrap().is_file());
+    }
+
+    #[test]
+    fn runtime_setup_command_points_at_the_staged_script() {
+        let command = runtime_setup_command().unwrap();
+        assert!(command.contains("setup-runtime.ps1"));
+        assert!(command.contains("ExecutionPolicy") || command.contains("-File"));
     }
 }

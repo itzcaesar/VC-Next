@@ -32,6 +32,7 @@ rules and test evidence below belong to VC Next.
 | RMVPE front context | Analyze the post-front tail; restore zero F0 frames | Same trim-and-restore boundary |
 | Retrieval | FAISS nearest vector, `k=1` | Same; index dimension is validated before load |
 | Retrieval front restore | Reuse the rolling post-inference feature buffer before the current tail | Same rolling buffer, including zero rows for each new live hop |
+| ONNX front context | Remove `npyOffset * 2` interpolated feature rows before the exported graph call | Same explicit trim; the live feature buffer stores the trimmed ONNX tail |
 | Protection | Preserve source features where `pitchf < 1` | Same mask and ratio range `0..0.5` |
 | Pitch shift | Multiply F0 by `2 ** (semitones / 12)` | Same |
 | Pitch coarse bins | 50–1100 Hz mel mapping, rounded 1–255 | Same |
