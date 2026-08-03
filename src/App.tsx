@@ -1004,6 +1004,14 @@ function App() {
     && engineStatus.inputPeak > 0.01
     && engineStatus.outputPeak <= 0.0005
     && (engineStatus.state === "passthrough" || engineStatus.inferenceCalls > 0);
+  // A virtual cable can open successfully while delivering an all-zero
+  // stream. Keep that separate from an output stall so users are told to fix
+  // the selected microphone/VoiceMeeter bus instead of chasing model settings.
+  const inputRouteSilent = signalActive
+    && !workerRecovering
+    && engineStatus.capturedFrames >= 96_000
+    && engineStatus.inputPeak <= 0.0005
+    && (engineStatus.state === "passthrough" || engineStatus.inferenceSilenceSuppressedCalls > 0);
   const inputPeakTone = peakTone(engineStatus.inputPeak);
   const outputPeakTone = peakTone(engineStatus.outputPeak);
   const clippingMessage = inputPeakTone === "clip" && outputPeakTone === "clip"
@@ -2357,6 +2365,7 @@ function App() {
             {!startupBusy && !audioReady && <div className="info-callout error" role="alert"><span>!</span><p><strong>Audio route incomplete.</strong> Refresh devices, then choose both a microphone and an output.</p></div>}
             {sampleRateDifference && <div className="info-callout warning" role="status"><span>↔</span><p><strong>Device rates differ.</strong> VC Next will resample the route to its 48 kHz RVC path. A matched-rate route may use slightly less CPU.</p></div>}
             {(inputPeakTone === "clip" || outputPeakTone === "clip") && <div className="info-callout error" role="alert"><span>!</span><p><strong>Clipping detected.</strong> {clippingMessage}</p></div>}
+            {inputRouteSilent && <div className="info-callout warning" role="alert"><span>!</span><p><strong>No input signal detected.</strong> The selected device is open but delivering silence. Check the microphone level or the VoiceMeeter/CABLE bus feeding it, then restart audio.</p><button type="button" className="details-toggle" onClick={recoverAudioSession} disabled={engineBusy}>Restart audio</button></div>}
             {outputRouteStalled && <div className="info-callout error" role="alert"><span>!</span><p><strong>Input is active but output is idle.</strong> Check the selected output or virtual-cable input, then restart audio.</p><button type="button" className="details-toggle" onClick={recoverAudioSession} disabled={engineBusy}>Restart audio</button></div>}
             {selectedModelCanLoad && !inferenceRuntime.readyForRvc && !startupBusy && <div className="info-callout warning"><span>!</span><p><strong>RVC runtime needs attention.</strong> {inferenceRuntime.blockers.slice(0, 3).join(" · ") || "Check Engine details before loading this voice."}</p><div className="callout-actions"><button type="button" className="details-toggle" onClick={() => void launchRuntimeSetup()} disabled={runtimeRefreshBusy || running}>{runtimeRefreshBusy ? "Opening…" : "Run setup"}</button><button type="button" className="details-toggle" onClick={() => void copyRuntimeSetupCommand()}>Copy command</button></div></div>}
             {onnxCpuFallback && <div className="info-callout warning" role="status"><span>!</span><p><strong>ONNX generator is using CPU.</strong> The model is compatible, but this provider is not a low-latency guarantee. Install a working ONNX Runtime CUDA stack or use the PyTorch checkpoint when available.</p></div>}

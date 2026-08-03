@@ -326,6 +326,26 @@ capture endpoint, however, so this harness is intentionally still marked
 pending for converted-speech acceptance; a non-zero worker or fixture result
 must not be mistaken for end-to-end device loopback proof.
 
+To capture the far side of a virtual cable for inspection, use the diagnostic
+recorder at the endpoint's own Windows sample rate. For example, Cable B's
+capture endpoint on the reference machine is 44.1 kHz even though the native
+RVC path runs internally at 48 kHz:
+
+```powershell
+& .\engine-python\.venv\Scripts\python.exe `
+  engine-python\tools\record_device.py `
+  --device "CABLE-B Output (VB-Audio Cable B)" `
+  --output outputs\native-cable-b-captured.wav `
+  --seconds 16 --sample-rate 44100 --block-size 441
+```
+
+Start the recorder before `validate:native-speech` so it captures the whole
+warm-up and speech window. The JSON summary reports the selected WASAPI
+instance, peak, mean absolute level, and callback warnings. A peak of `0`
+means the cable endpoint was silent; it is a route/VoiceMeeter bus problem,
+not evidence that the RVC model generated silence. The desktop UI makes the
+same distinction with its **No input signal detected** warning.
+
 After the w-okada parity pass, the real-model Balanced worker reports
 `f0Threshold: 0.30`, an explicit `extraFrames` value, and a rounded
 `analysisFrames` value. `silenceFrontFeatureFrames` is calculated from the

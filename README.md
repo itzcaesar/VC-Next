@@ -420,6 +420,22 @@ This harness validates the converted sidecar route and its realtime budget; it
 does not replace the native Rust/CPAL path or the final physical loopback
 measurement. The report is written to `outputs\reference-validation\live-route-validation.json`.
 
+For a real native route, capture the far side of a virtual cable with the
+diagnostic recorder. Use the endpoint's Windows rate (Cable B is 44.1 kHz on
+the reference machine) and start it before the speech harness:
+
+```powershell
+& .\engine-python\.venv\Scripts\python.exe `
+  engine-python\tools\record_device.py `
+  --device "CABLE-B Output (VB-Audio Cable B)" `
+  --output outputs\native-cable-b-captured.wav `
+  --seconds 16 --sample-rate 44100 --block-size 441
+```
+
+The helper writes a mono WAV plus a JSON summary to stdout. A zero peak means
+the selected input endpoint is open but silent; check the VoiceMeeter bus and
+the app's **No input signal detected** warning before changing model settings.
+
 To exercise the actual native Windows route used by the Tauri host, use the
 native validation binary. It enumerates CPAL/WASAPI endpoints, loads the paired
 checkpoint and index, starts native input/output/optional monitor streams, and
@@ -516,6 +532,6 @@ See [Upstream assessment](docs/upstream-assessment.md) and [RVC compatibility pr
 
 ## Project status
 
-VC Next is under active development. Historical CABLE-A passthrough acceptance detected 100/100 impulses, but the current WASAPI-selected shared-rate probe returns 0/2 impulses with zero callback warnings on this machine; the app now surfaces that stalled-route condition instead of hiding it. Audio setup includes a bounded Test routes tone for checking real output/Monitor callbacks without a cable loopback. The native route has also passed an idle real-model run with zero output peak, XRuns, or inference deadline misses. The installed release sidecar has loaded the real paired checkpoint/index on CUDA, and a 120-second realtime Balanced soak completed with zero deadline misses. Physical converted-speech certification, the two-hour acceptance matrix, signed distribution, and a built-in virtual-microphone strategy remain next.
+VC Next is under active development. Historical CABLE-A passthrough acceptance detected 100/100 impulses, but the current WASAPI-selected shared-rate probe returns 0/2 impulses with zero callback warnings on this machine; the app surfaces stalled and silent-input routes instead of hiding them. Audio setup includes a bounded Test routes tone for checking real output/Monitor callbacks without a cable loopback. The native route has passed an idle real-model run with zero output peak, XRuns, or inference deadline misses, and one VoiceMeeter Out B1 → CABLE-B speech run produced nonzero converted output with zero underruns and missed deadlines. That graph is not yet reproducible: later runs correctly reported an all-zero input when the VoiceMeeter bus was silent. The installed release sidecar has loaded the real paired checkpoint/index on CUDA, and a 120-second realtime Balanced soak completed with zero deadline misses. A repeatable recorded converted-speech loopback, two-hour acceptance matrix, signed distribution, and a built-in virtual-microphone strategy remain next.
 
 If you are testing the alpha, useful reports include your Windows version, GPU and driver, model target rate, selected Chunk/Extra values, device routes, exported diagnostics, and whether the failure occurs during import, warm-up, or live audio.

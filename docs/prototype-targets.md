@@ -36,7 +36,7 @@ This machine is a development reference, not a minimum-system specification.
 | Audio clock stabilization | Complete for prototype | Adaptive priming and bounded drop/repeat correction |
 | Per-model stream calibration | Complete for prototype | Measures three steady-state calls for all profiles, guards against p95/max spikes, and recommends a stable Chunk/Extra pair |
 | Reference validation report | Complete for prototype | Runtime probe, real-model smoke, optional endpoint loopback, and optional converted-worker soak in one report |
-| Physical loopback benchmark | Cable graph unresolved; native idle route validated; speech loopback pending | Historical CABLE-A runs detected 105/105 and 100/100 impulses, but the current WASAPI-selected, shared-rate probe detected 0/2 impulses with zero callback warnings. The native Rust/CPAL route also completed a five-second real-model idle run with zero output peak, zero XRuns, and zero missed inference deadlines. A physical converted-speech loopback and alternate-device certification remain |
+| Physical loopback benchmark | Alternate route observed; repeatable capture pending | Historical CABLE-A runs detected 105/105 and 100/100 impulses, but the current WASAPI-selected, shared-rate probe detected 0/2 impulses with zero callback warnings. A native Rust/CPAL run using VoiceMeeter Out B1 → CABLE-B Input produced nonzero input/output peaks with zero underruns, overruns, queue drops, and missed deadlines. Repeating the same graph later returned an all-zero input, so the VoiceMeeter bus selection is not yet reproducible; a recorded converted WAV and route-prescription check remain |
 | Converted-audio soak certification | 120-second worker soak passed; multi-hour/native speech soak pending | `live_route_validation.py` passed a 5-second real VoiceMeeter input 7 → CABLE-B output 13 run on the RTX 4050 reference system with 0 deadline misses, callback warnings, queue drops, or output underruns (Quality 250/600 ms; P50 145.3 ms, P95 224.5 ms, max 247.8 ms). The current Balanced worker run completed 600 realtime hops over 120 seconds with finite output, 0 deadline misses, P50 91.2 ms, P95 105.9 ms, and 154.4 ms max. The native route has an idle/noise-gate smoke result; the multi-hour native speech acceptance matrix remains to be run |
 | Windows installer bundles | Complete for prototype | Optimized Tauri MSI/NSIS bundles launch the GUI host, place the staged module beside it as `engine-python`, and include the runtime manifest. An isolated release NSIS install was verified, the installed sidecar loaded the real paired checkpoint/index on CUDA, and the installed GUI stayed alive; signing and dependency installation remain |
 | Production installer and updater | Deferred | Python/CUDA dependency bootstrap, signing, and update channel not implemented |
@@ -104,13 +104,17 @@ exactly 0.0 and all ten hops were suppressed by the idle-input gate. This is a
 validated static-noise fix for the empty route, not yet a blind quality match.
 
 The same model/settings were then exercised through the native CPAL/WASAPI
-route with `native-route-validation`. The five-second run used VoiceMeeter Out
-A2 as input and CABLE-B Input as output. It completed 501 native inference
-calls with 0 missed deadlines, 0 queue drops, 0 underruns, and 0 input/output
-peaks while the source endpoint was idle. The native report is now the baseline
-for checking the desktop host; a non-zero speech fixture still needs to be
-routed through a controlled loopback before declaring converted-speech quality
-parity.
+route with `native-route-validation`. The idle VoiceMeeter Out A2 → CABLE-B
+run completed 501 native callbacks with 0 missed deadlines, 0 queue drops, 0
+underruns, and 0 input/output peaks. A separate speech run using VoiceMeeter
+Out B1 → CABLE-B Input produced nonzero input and converted-output peaks with
+812 inference calls, 0 missed deadlines, 0 queue drops, 0 underruns, and one
+bounded drift correction. That graph later returned an all-zero input when the
+VoiceMeeter bus was not carrying the fixture, which is now surfaced in the UI
+as **No input signal detected** rather than being mistaken for a model failure.
+A recorder helper can capture a selected cable endpoint at its native sample
+rate, but a repeatable nonzero converted WAV is still required before claiming
+end-to-end speech quality parity.
 
 The current realtime worker soak then ran the same paired checkpoint for 120
 wall-clock seconds (600 Balanced hops). It produced finite output for every hop,
