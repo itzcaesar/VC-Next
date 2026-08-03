@@ -139,6 +139,13 @@ def _index_name_affinity(checkpoint: Path, index: Path) -> int:
                 continue
             if token.startswith("ivf") or token.startswith("nprobe") or token.isdigit():
                 continue
+            # RVC exports commonly append shared build metadata to every voice
+            # filename (for example ``_v2_40k_e100``).  Those markers must not
+            # make an unrelated index look like a companion for an ONNX voice.
+            # Keep meaningful names such as ``e-girl`` and ``model`` while
+            # ignoring version, epoch, sample-rate and step-count fragments.
+            if len(token) == 1 or re.fullmatch(r"v\d+|e\d+|s\d+|f\d+|\d+k", token):
+                continue
             result.add(token)
         return result
 

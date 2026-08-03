@@ -36,7 +36,7 @@ The project is built around four practical goals:
 | --- | --- |
 | Desktop | Tauri 2 host with a React 19 and TypeScript interface |
 | Audio | Native Windows input, converted output, and optional headphone monitor routes |
-| Models | RVC v1/v2 PyTorch checkpoints and exported five-input ONNX generators, with 32, 40, or 48 kHz generator output |
+| Models | RVC v1/v2 PyTorch checkpoints and exported five-input ONNX generators, with 32, 40, or 48 kHz generator output; five reference ONNX voices are verified on CUDA |
 | Library | Persistent local model entries with custom names, search, rename, and safe removal |
 | Retrieval | Optional paired FAISS `.index` loading with dimension validation |
 | Features | ContentVec encoding and RMVPE pitch extraction through ONNX Runtime, with an optional Fairseq HuBERT fallback |
@@ -55,7 +55,7 @@ The project is built around four practical goals:
 - A built-in virtual microphone driver
 - Model training or dataset preparation
 - macOS, Linux, AMD, or Intel GPU support
-- Broader ONNX generator coverage and CUDA performance certification across exported model variants
+- Broader ONNX generator coverage and CUDA performance certification beyond the five reference voices
 - Physical-loopback latency certification or multi-hour converted-audio soak results
 - Full WebRTC/RNNoise-class acoustic echo cancellation; the current echo control is intentionally lightweight and safe for real-time callbacks
 
@@ -551,6 +551,6 @@ See [Upstream assessment](docs/upstream-assessment.md) and [RVC compatibility pr
 
 ## Project status
 
-VC Next is under active development. Historical CABLE-A passthrough acceptance detected 100/100 impulses, but the current WASAPI-selected shared-rate probe returns 0/2 impulses with zero callback warnings on this machine; the app surfaces stalled and silent-input routes instead of hiding them. Audio setup includes a bounded Test routes tone for checking real output/Monitor callbacks without a cable loopback. The native route has passed an idle real-model run with zero output peak, XRuns, or inference deadline misses, and one VoiceMeeter Out B1 → CABLE-B speech run produced nonzero converted output with zero underruns and missed deadlines. That graph is not yet reproducible: later runs correctly reported an all-zero input when the VoiceMeeter bus was silent. The reference model directory's four paired `.pth + .index` voices (v1/v2, 32/40/48 kHz) now all load and pass seeded CUDA worker smoke tests. The installed release sidecar has loaded the real paired checkpoint/index on CUDA, and a 120-second realtime Balanced soak completed with zero deadline misses. A repeatable recorded converted-speech loopback, two-hour acceptance matrix, signed distribution, and a built-in virtual-microphone strategy remain next.
+VC Next is under active development. Historical CABLE-A passthrough acceptance detected 100/100 impulses, but the current WASAPI-selected shared-rate probe returns 0/2 impulses with zero callback warnings on this machine; the app surfaces stalled and silent-input routes instead of hiding them. Audio setup includes a bounded Test routes tone for checking real output/Monitor callbacks without a cable loopback. The native route has passed an idle real-model run with zero output peak, XRuns, or inference deadline misses, and one VoiceMeeter Out B1 → CABLE-B speech run produced nonzero converted output with zero underruns and missed deadlines. That graph is not yet reproducible: later runs correctly reported an all-zero input when the VoiceMeeter bus was silent. The reference model directory's four paired `.pth + .index` voices (v1/v2, 32/40/48 kHz) now all load and pass seeded CUDA worker smoke tests, and its five exported ONNX voices pass seeded CUDA smoke with retrieval off when no matching `.index` exists. Index discovery ignores generic export markers such as `v2`, `40k`, and epoch fragments, so an unrelated neighboring index is not silently attached. The installed release sidecar has loaded the real paired checkpoint/index on CUDA, and a 120-second realtime Balanced soak completed with zero deadline misses. A repeatable recorded converted-speech loopback, two-hour acceptance matrix, signed distribution, and a built-in virtual-microphone strategy remain next.
 
 If you are testing the alpha, useful reports include your Windows version, GPU and driver, model target rate, selected Chunk/Extra values, device routes, exported diagnostics, and whether the failure occurs during import, warm-up, or live audio.

@@ -410,6 +410,7 @@ class LiveRvcProcessor:
         pitch_shift = validate_pitch_shift(
             value_or_default("pitchShift", package_defaults.get("pitchShift", 0.0))
         )
+        explicit_index_ratio = params.get("indexRatio")
         index_ratio = validate_index_ratio(
             value_or_default("indexRatio", package_defaults.get("indexRatio", 0.0))
         )
@@ -454,7 +455,15 @@ class LiveRvcProcessor:
             or ""
         ).strip()
         if index_ratio > 0.0 and not index_path:
-            raise ValueError("An index ratio above zero requires a selected .index file.")
+            # A w-okada params.json can retain a retrieval ratio after its
+            # optional .index file was removed or never shipped.  Treat that
+            # metadata as a safe no-retrieval default; an explicit UI ratio is
+            # still rejected so a user never thinks retrieval is active when
+            # no index was loaded.
+            if explicit_index_ratio is None and package_defaults.get("indexRatio") is not None:
+                index_ratio = 0.0
+            else:
+                raise ValueError("An index ratio above zero requires a selected .index file.")
 
         loaded = (
             load_onnx_generator(model_path)

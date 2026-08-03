@@ -160,6 +160,25 @@ class ModelInspectionTests(unittest.TestCase):
         self.assertFalse(result["packageComplete"])
         self.assertIn("can still run", result["pairingNote"])
 
+    def test_onnx_voice_does_not_inherit_unrelated_neighbor_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_dir = root / "model_dir"
+            onnx_slot = model_dir / "0"
+            index_slot = model_dir / "5"
+            onnx_slot.mkdir(parents=True)
+            index_slot.mkdir(parents=True)
+            model = onnx_slot / "kikoto_kurage_v2_40k_e100_float.onnx"
+            unrelated = index_slot / "added_IVF1611_Flat_nprobe_1_e-girl_v2.index"
+            model.write_bytes(b"onnx")
+            unrelated.write_bytes(b"index")
+
+            result = inspect_model(str(model))
+
+        self.assertIsNone(result["recommendedIndex"])
+        self.assertEqual(result["siblingIndexes"], [])
+        self.assertEqual(result["modelDefaults"].get("indexRatio"), None)
+
     def test_w_okada_params_are_exposed_as_safe_model_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

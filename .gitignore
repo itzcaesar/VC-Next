@@ -21,7 +21,8 @@ engine-python/**/__pycache__/
 engine-python/.pytest_cache/
 *.pyc
 
-# Generated local audio probes
+# Generated local audio probes and validation artifacts
+outputs/
 outputs/*.wav
 outputs/*.json
 outputs/reference-validation/

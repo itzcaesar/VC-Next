@@ -108,6 +108,28 @@ This validates the paired `.pth + .index` loading path across the tested v1,
 perceptual quality and physical-device latency still require recorded speech
 comparisons.
 
+The same reference `model_dir` also contains five exported five-input ONNX
+generators. A seeded three-hop Balanced smoke was repeated after tightening
+index discovery so an ONNX voice cannot inherit an unrelated index merely
+because it shares a package root with another voice. These files have no
+matching sibling index, so retrieval is intentionally off (`indexLoaded=false`)
+for every run:
+
+| ONNX generator | Backend | Retrieval | Average hop | Streaming peak | Deadline |
+| --- | --- | --- | ---: | ---: | --- |
+| `kikoto_kurage_v2_40k_e100_float.onnx` | CUDA ONNX | Off | 35.2 ms | 0.00 | Met |
+| `kikoto_mahiro_v2_40k_float.onnx` | CUDA ONNX | Off | 61.7 ms | 0.05 | Met |
+| `tokina_shigure_v2_40k_e100_float.onnx` | CUDA ONNX | Off | 61.4 ms | 0.06 | Met |
+| `amitaro_v2_40k_e100_float.onnx` | CUDA ONNX | Off | 65.9 ms | 0.08 | Met |
+| `tsukuyomi_v2_40k_e100_float.onnx` | CUDA ONNX | Off | 71.3 ms | 0.08 | Met |
+
+The `tsukuyomi` package was also loaded with its adjacent w-okada
+`params.json`; its pitch and 24,000-frame Chunk metadata were applied while
+the stale 1.0 retrieval ratio was safely reduced to zero because no `.index`
+was present. An explicit index selected by the user still remains required for
+retrieval. This is a generator/runtime compatibility result, not a claim that
+all exported ONNX graph signatures or perceptual quality variants are covered.
+
 Historical 105-impulse and exact-count CABLE-A endpoint runs detected every impulse with zero callback warnings and measured a 247.7 ms P50/P95 passthrough delay. After the validation harness was hardened to select the WASAPI instance and enable shared-rate conversion, the same machine returned 0/2 impulses with zero warnings. These results are not contradictory claims about the model: they show that the cable graph/host selection is not currently reproducible. They are route baselines, not converted-voice latency results; the provisional 150 ms Balanced target therefore remains unproven for the application path.
 
 The first real converted-route smoke now passes through the persistent worker: on the RTX 4050 reference system, the real e-girl v2 checkpoint and matching index were driven from VoiceMeeter input 7 to CABLE-B output 13 for 5 seconds using the Quality 12,000/28,800-frame profile. It completed 20 finite calls with zero deadline misses, callback warnings, input/output queue drops, or output underruns; worker timing was 145.3 ms P50, 224.5 ms P95, and 247.8 ms max. The first played sample arrived after 747.9 ms because the harness deliberately waits for a two-chunk safety prime; this is a startup/prime measurement, not a steady-state conversational-latency claim. The run validates the converted sidecar route, while the native Rust/CPAL route and multi-hour soak remain separate acceptance items.
