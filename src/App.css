@@ -491,6 +491,17 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .level-meter.tone-clip i, .level-meter.tone-clip i.peak { background: var(--danger); }
 .level-meter.tone-clip i { animation: meter 300ms ease-in-out infinite alternate; }
 @keyframes meter { from { opacity: .25; } to { opacity: 1; } }
+.routing-guide { margin: 2px 0 14px; border: 1px solid var(--stroke-soft); border-radius: 5px; background: var(--surface); }
+.routing-guide-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 11px; }
+.routing-guide-heading > div { min-width: 0; }
+.routing-guide-heading strong, .routing-guide-heading small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.routing-guide-heading strong { color: var(--text); font-size: 11px; font-weight: 620; }
+.routing-guide-heading small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.routing-guide-body { border-top: 1px solid var(--stroke-soft); padding: 10px 11px 11px; }
+.routing-guide-body p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.routing-guide-body p strong { color: var(--text); font-weight: 620; }
+.routing-guide-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.routing-guide-ready { color: var(--success); font-size: 10px; font-weight: 620; }
 .info-callout { display: grid; grid-template-columns: 18px 1fr; gap: 8px; border-left: 2px solid currentColor; padding: 9px 10px; }
 .info-callout > span { width: 16px; height: 16px; display: grid; place-items: center; font-size: 10px; font-weight: 700; }
 .info-callout p { margin: 0; font-size: 11px; line-height: 1.45; }

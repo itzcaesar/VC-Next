@@ -200,6 +200,40 @@ function deviceSummary(device: AudioDevice | undefined) {
   return `${device.sampleRate.toLocaleString()} Hz · ${channelLabel} · ${device.sampleFormat}`;
 }
 
+function normalizedRouteName(name: string) {
+  return name
+    .toLocaleLowerCase()
+    .replace(/\b(input|output|playback|recording|in|out)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isVirtualRouteDevice(device: AudioDevice | undefined) {
+  return Boolean(device && /(cable|voicemeeter|virtual|vb[- ]?audio|blackhole|loopback)/i.test(device.name));
+}
+
+function findVirtualOutput(snapshot: AudioDeviceSnapshot) {
+  const candidates = snapshot.outputs.filter((device) =>
+    isVirtualRouteDevice(device) && /\b(input|playback|speaker|line)\b/i.test(device.name),
+  );
+  return candidates.find((output) => snapshot.inputs.some((input) =>
+    isVirtualRouteDevice(input) && normalizedRouteName(input.name) === normalizedRouteName(output.name),
+  )) ?? candidates[0];
+}
+
+function findVirtualInput(snapshot: AudioDeviceSnapshot, output: AudioDevice | undefined) {
+  if (!output) return undefined;
+  return snapshot.inputs.find((input) =>
+    isVirtualRouteDevice(input) && normalizedRouteName(input.name) === normalizedRouteName(output.name),
+  );
+}
+
+function shortDeviceName(device: AudioDevice | undefined) {
+  if (!device) return "virtual cable";
+  return device.name.replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function peakDb(peak: number) {
   return peak > 0.00001 ? `${(20 * Math.log10(peak)).toFixed(1)}` : "−∞";
 }
@@ -595,6 +629,7 @@ function App() {
   const [routeTestResult, setRouteTestResult] = useState<AudioRouteTestResult | null>(null);
   const [loopbackTestBusy, setLoopbackTestBusy] = useState(false);
   const [loopbackTestResult, setLoopbackTestResult] = useState<AudioLoopbackTestResult | null>(null);
+  const [routingGuideOpen, setRoutingGuideOpen] = useState(false);
   const [runtimeRefreshBusy, setRuntimeRefreshBusy] = useState(false);
   const [startupBusy, setStartupBusy] = useState(true);
   const [modelQuery, setModelQuery] = useState("");
@@ -1008,6 +1043,9 @@ function App() {
   const inputDevice = devices.inputs.find((device) => device.id === inputDeviceId);
   const outputDevice = devices.outputs.find((device) => device.id === outputDeviceId);
   const monitorDevice = devices.outputs.find((device) => device.id === monitorDeviceId);
+  const suggestedVirtualOutput = findVirtualOutput(devices);
+  const suggestedVirtualInput = findVirtualInput(devices, suggestedVirtualOutput);
+  const selectedOutputIsVirtual = isVirtualRouteDevice(outputDevice);
   const selectedModelLoaded = liveRvcStatus.state === "ready"
     && sameWindowsPath(liveRvcStatus.modelPath, selectedModel.sourcePath);
   // Retrieval indexes are loaded together with the checkpoint. The resident
@@ -1346,6 +1384,16 @@ function App() {
     } finally {
       setDeviceRefreshBusy(false);
     }
+  }
+
+  function useSuggestedVirtualOutput() {
+    if (!suggestedVirtualOutput || running) return;
+    setOutputDeviceId(suggestedVirtualOutput.id);
+    if (monitorDeviceId === suggestedVirtualOutput.id) setMonitorDeviceId("");
+    setRouteTestResult(null);
+    setLoopbackTestResult(null);
+    setNotice(`Output set to ${shortDeviceName(suggestedVirtualOutput)}; choose its matching Windows recording endpoint in Discord or OBS`);
+    appendLiveLog(`Virtual route selected · ${suggestedVirtualOutput.name}`, "success");
   }
 
   async function runRouteTest() {
@@ -2410,6 +2458,32 @@ function App() {
               </select>
             </label>
             <LevelMeter active={hasMonitorSignal} output peak={engineStatus.monitorPeak} />
+
+            <div className={`routing-guide ${routingGuideOpen ? "open" : ""}`}>
+              <div className="routing-guide-heading">
+                <div>
+                  <strong>Virtual cable routing</strong>
+                  <small>{selectedOutputIsVirtual
+                    ? `Output is set to ${shortDeviceName(outputDevice)}`
+                    : suggestedVirtualOutput
+                      ? `${shortDeviceName(suggestedVirtualOutput)} detected`
+                      : "Optional for Discord, OBS, and game chat"}</small>
+                </div>
+                <button type="button" className="details-toggle" aria-expanded={routingGuideOpen} onClick={() => setRoutingGuideOpen((value) => !value)}>{routingGuideOpen ? "Hide" : "Guide"}</button>
+              </div>
+              {routingGuideOpen && <div className="routing-guide-body">
+                {suggestedVirtualOutput ? <>
+                  <p><strong>VC Next output</strong> → {suggestedVirtualOutput.name}. In Discord or OBS, choose the matching <strong>recording</strong> endpoint{suggestedVirtualInput ? ` (${suggestedVirtualInput.name})` : ""} as the microphone. Keep Monitor on headphones to avoid feedback.</p>
+                  <div className="routing-guide-actions">
+                    {!selectedOutputIsVirtual && <button type="button" className="details-toggle" onClick={useSuggestedVirtualOutput} disabled={running}>Use {shortDeviceName(suggestedVirtualOutput)} for output</button>}
+                    {selectedOutputIsVirtual && <span className="routing-guide-ready">✓ Output direction looks correct</span>}
+                  </div>
+                </> : <>
+                  <p>No common VB-CABLE or VoiceMeeter pair was found. Install one virtual cable, then refresh devices. The app uses its <strong>playback/Input</strong> endpoint; Discord and OBS use the matching <strong>recording/Output</strong> endpoint.</p>
+                  <div className="routing-guide-actions"><button type="button" className="details-toggle" onClick={refreshDevices} disabled={running || deviceRefreshBusy}>{deviceRefreshBusy ? "Checking…" : "Refresh devices"}</button></div>
+                </>}
+              </div>}
+            </div>
 
             {routeTestResult && <div className={`info-callout ${routeTestResult.outputError ? "error" : routeTestResult.monitorError ? "warning" : "success"}`} role="status">
               <span>{routeTestResult.outputError ? "!" : routeTestResult.monitorError ? "!" : "✓"}</span>
