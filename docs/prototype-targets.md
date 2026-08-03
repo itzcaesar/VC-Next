@@ -91,6 +91,23 @@ The indexed low-latency RVC fixture on the RTX 4050 baseline averaged 107 ms acr
 
 The same live path now also passes a real RVC v1 checkpoint with its 256-dimensional `IndexIVFFlat` index: three Balanced hops completed in approximately 119–129 ms after a 6.7 s load, with the ContentVec `units9` head selected automatically and generator output resampled from 40 kHz to the fixed 48 kHz live path.
 
+A compatibility sweep of the four `.pth` voices in the reference w-okada
+`model_dir` also completed successfully with their sibling indexes and the
+ContentVec ONNX backend. Three seeded Balanced hops were finite and met their
+deadlines for every voice:
+
+| Checkpoint | RVC target | Index dimension / vectors | Average hop | Streaming peak |
+| --- | ---: | ---: | ---: | ---: |
+| `e-girl_e350_s42700.pth` | 48 kHz v2 | 768 / 62,851 | 88.7 ms | 0.09 |
+| `PrabowoOwO_340e_7480s.pth` | 32 kHz v2 | 768 / 42,081 | 91.9 ms | 0.11 |
+| `model.pth` | 40 kHz v1 | 256 / 62,082 | 77.5 ms | 0.10 |
+| `mayaputri.pth` | 48 kHz v2 | 768 / 34,823 | 85.6 ms | 0.07 |
+
+This validates the paired `.pth + .index` loading path across the tested v1,
+32 kHz, 40 kHz, and 48 kHz variants. It is a compatibility/compute result;
+perceptual quality and physical-device latency still require recorded speech
+comparisons.
+
 Historical 105-impulse and exact-count CABLE-A endpoint runs detected every impulse with zero callback warnings and measured a 247.7 ms P50/P95 passthrough delay. After the validation harness was hardened to select the WASAPI instance and enable shared-rate conversion, the same machine returned 0/2 impulses with zero warnings. These results are not contradictory claims about the model: they show that the cable graph/host selection is not currently reproducible. They are route baselines, not converted-voice latency results; the provisional 150 ms Balanced target therefore remains unproven for the application path.
 
 The first real converted-route smoke now passes through the persistent worker: on the RTX 4050 reference system, the real e-girl v2 checkpoint and matching index were driven from VoiceMeeter input 7 to CABLE-B output 13 for 5 seconds using the Quality 12,000/28,800-frame profile. It completed 20 finite calls with zero deadline misses, callback warnings, input/output queue drops, or output underruns; worker timing was 145.3 ms P50, 224.5 ms P95, and 247.8 ms max. The first played sample arrived after 747.9 ms because the harness deliberately waits for a two-chunk safety prime; this is a startup/prime measurement, not a steady-state conversational-latency claim. The run validates the converted sidecar route, while the native Rust/CPAL route and multi-hour soak remain separate acceptance items.
