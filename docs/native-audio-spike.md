@@ -141,14 +141,17 @@ At 48 kHz:
 
 | State | Frames | Approximate buffered time |
 | --- | ---: | ---: |
-| Initial target | 1,920 | 40 ms |
-| Maximum adaptive target | 4,800 | 100 ms |
+| Initial target | 2,880 | 60 ms |
+| Maximum adaptive target | 7,680 | 160 ms |
 
-On startup the host now waits for an eight-chunk cushion (3,840 frames, about
-80 ms) before it starts the output stream. The steady-state controller begins
-at the 40 ms target and grows only when a device actually underruns; this keeps
+On startup the host now waits for a twelve-chunk cushion (5,760 frames, about
+120 ms) before it starts the output stream. The steady-state controller begins
+at the 60 ms target and grows only when a device actually underruns; this keeps
 the normal path responsive without exposing the first CUDA/RVC warm-up as an
-audible click.
+audible click. A brief starvation is reported as one recovery episode: the
+last sample fades toward silence for roughly 10 ms, then silence is held until
+the queue refills. This avoids a hard click without hiding the route failure
+from telemetry.
 
 The controller starts at the lower target, raises it after underruns, and gradually settles back after a stable period. This trades a bounded amount of latency for fewer repeated dropouts on devices with scheduling jitter.
 

@@ -207,9 +207,24 @@ if ($capture) {
 }
 if ($RequireSignal) {
     $nativeReport = Get-Content -LiteralPath $reportFullPath -Raw | ConvertFrom-Json
-    $inputPeak = [double]($nativeReport.maxInputPeak ?? 0)
-    $outputPeak = [double]($nativeReport.maxOutputPeak ?? 0)
-    $capturePeak = if ($captureSummary) { [double]($captureSummary.peak ?? 0) } else { $null }
+    # Keep this wrapper compatible with the Windows PowerShell 5.1 that is
+    # present on a stock Windows installation. PowerShell 7's null-coalescing
+    # operator (??) is not available there.
+    $inputPeak = 0.0
+    if ($nativeReport -and $nativeReport.PSObject.Properties.Name -contains "maxInputPeak" -and $null -ne $nativeReport.maxInputPeak) {
+        $inputPeak = [double]$nativeReport.maxInputPeak
+    }
+    $outputPeak = 0.0
+    if ($nativeReport -and $nativeReport.PSObject.Properties.Name -contains "maxOutputPeak" -and $null -ne $nativeReport.maxOutputPeak) {
+        $outputPeak = [double]$nativeReport.maxOutputPeak
+    }
+    $capturePeak = $null
+    if ($captureSummary) {
+        $capturePeak = 0.0
+        if ($captureSummary.PSObject.Properties.Name -contains "peak" -and $null -ne $captureSummary.peak) {
+            $capturePeak = [double]$captureSummary.peak
+        }
+    }
     if ($inputPeak -lt $MinimumPeak -or $outputPeak -lt $MinimumPeak) {
         $captureDetail = if ($captureSummary) { ", far-end capture peak $capturePeak" } else { "" }
         throw "The speech route was silent (max input peak $inputPeak, max output peak $outputPeak$captureDetail; minimum $MinimumPeak). Check the fixture bus and selected endpoints. Report: $reportFullPath"

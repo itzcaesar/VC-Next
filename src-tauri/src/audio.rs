@@ -28,12 +28,13 @@ const ECHO_REFERENCE_RING_FRAMES: usize = 8_192;
 const ECHO_HISTORY_FRAMES: usize = 2_048;
 const ECHO_TAPS: usize = 64;
 const ECHO_DELAY_FRAMES: usize = 480;
-// Keep enough converted audio to cover a normal RVC hop plus a short CUDA or
-// WASAPI scheduling spike. This is still bounded (40 ms at 48 kHz) and can
-// grow to the 100 ms adaptive ceiling after a real underrun.
-const INITIAL_PRIME_FRAMES: usize = WORKER_CHUNK_FRAMES * 4;
-const STARTUP_PRIME_FRAMES: usize = WORKER_CHUNK_FRAMES * 8;
-const MAX_PRIME_FRAMES: usize = WORKER_CHUNK_FRAMES * 10;
+// Keep a little more output queued on consumer Windows routes. The previous
+// 40 ms baseline was enough for short tests but could starve during an
+// occasional scheduler spike on split-rate 44.1/48 kHz virtual cables. The
+// cushion is still bounded and is reduced again after a sustained clean run.
+const INITIAL_PRIME_FRAMES: usize = WORKER_CHUNK_FRAMES * 6;
+const STARTUP_PRIME_FRAMES: usize = WORKER_CHUNK_FRAMES * 12;
+const MAX_PRIME_FRAMES: usize = WORKER_CHUNK_FRAMES * 16;
 const STARTUP_PRIME_TIMEOUT: Duration = Duration::from_millis(1_000);
 const DRIFT_HIGH_MARGIN_FRAMES: usize = WORKER_CHUNK_FRAMES * 2;
 const DRIFT_LOW_WATERMARK_FRAMES: usize = WORKER_CHUNK_FRAMES / 2;
@@ -1310,6 +1311,8 @@ struct AdaptivePlayback {
     frames_until_correction: usize,
     stable_frames: u64,
     last_sample: f32,
+    recovery_remaining_frames: usize,
+    underrun_active: bool,
 }
 
 /// Converts the fixed 48 kHz inference stream to an output/monitor device rate. It uses
@@ -1401,6 +1404,8 @@ impl AdaptivePlayback {
             frames_until_correction: (sample_rate as usize / 20).max(1),
             stable_frames: 0,
             last_sample: 0.0,
+            recovery_remaining_frames: 0,
+            underrun_active: false,
         }
     }
 
@@ -1434,19 +1439,40 @@ impl AdaptivePlayback {
             result.repeated = true;
         } else if let Some(sample) = ring.pop() {
             result.sample = sample;
+            self.recovery_remaining_frames = 0;
+            self.underrun_active = false;
         } else {
-            self.primed = false;
             self.stable_frames = 0;
-            let previous_target = self.target_frames;
-            self.target_frames = self
-                .target_frames
-                .saturating_add(WORKER_CHUNK_FRAMES)
-                .min(MAX_PRIME_FRAMES);
-            result.primed = false;
-            result.underrun = true;
-            result.reprime = true;
-            result.target_changed = self.target_frames != previous_target;
-            return result;
+            let first_empty_frame = !self.underrun_active;
+            self.underrun_active = true;
+            if first_empty_frame {
+                let previous_target = self.target_frames;
+                self.target_frames = self
+                    .target_frames
+                    .saturating_add(WORKER_CHUNK_FRAMES)
+                    .min(MAX_PRIME_FRAMES);
+                result.underrun = true;
+                result.reprime = true;
+                result.target_changed = self.target_frames != previous_target;
+                self.recovery_remaining_frames = (self.sample_rate as usize / 100).max(1);
+            }
+
+            // A short queue starvation should not turn into a long hard gap.
+            // Fade the last sample toward silence for roughly 10 ms, then hold
+            // silence until the worker refills the queue. The first empty frame
+            // remains visible in telemetry, while repeated empty callbacks are
+            // counted as one recovery episode rather than thousands of events.
+            if self.recovery_remaining_frames > 0 {
+                let holdover_frames = (self.sample_rate as usize / 100).max(1);
+                let recovery_gain =
+                    self.recovery_remaining_frames as f32 / holdover_frames as f32;
+                result.sample = self.last_sample * recovery_gain;
+                self.recovery_remaining_frames =
+                    self.recovery_remaining_frames.saturating_sub(1);
+            } else {
+                result.sample = 0.0;
+            }
+            result.primed = true;
         }
 
         self.last_sample = result.sample;
@@ -2242,7 +2268,10 @@ mod tests {
         let underrun = playback.read(&ring);
         assert!(underrun.underrun);
         assert!(underrun.reprime);
-        assert!(!underrun.primed);
+        assert!(underrun.primed);
+        let continuation = playback.read(&ring);
+        assert!(!continuation.underrun);
+        assert!(continuation.primed);
         assert_eq!(
             playback.target_frames,
             INITIAL_PRIME_FRAMES + WORKER_CHUNK_FRAMES
