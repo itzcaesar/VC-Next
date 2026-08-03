@@ -251,6 +251,15 @@ VC Next exposes three device routes:
 
 The native path keeps the RVC model contract at 48 kHz and resamples input/output/monitor endpoints when their Windows defaults differ. A built-in virtual microphone is planned; for now, use an existing virtual cable or VoiceMeeter route.
 
+The **Virtual cable routing** guide in the Audio setup panel recognizes common
+VB-CABLE and VoiceMeeter endpoint pairs. When it finds one, **Use … for
+output** selects the playback/Input side for VC Next and shows the matching
+recording/Output side to choose in Discord, OBS, or game chat. The guide never
+changes the microphone or Monitor route automatically, and it remains useful
+when no virtual device is installed by explaining the expected Windows
+direction. This is a routing aid, not a bundled or signed virtual-microphone
+driver.
+
 While audio is running, VC Next checks the selected endpoints periodically. If Windows removes a microphone, output, or monitor device, the session stays visible and offers **Restart audio** after the endpoint returns instead of silently switching to a different device.
 
 ## Voice and streaming controls
